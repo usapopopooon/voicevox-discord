@@ -1,0 +1,26 @@
+services:
+  voicevox:
+    # ローカルでVOICEVOX APIを直接叩けるようにポート公開
+    ports:
+      - "50021:50021"
+
+  postgres:
+    # ローカルでDBに直接接続できるようにポート公開
+    ports:
+      - "5432:5432"
+
+  discord-bot:
+    # 本番Dockerfileではなく開発用を使う
+    build:
+      context: ./bot
+      dockerfile: Dockerfile.dev
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      DATABASE_URL: postgresql://bot:bot@postgres:5432/voicevox_bot
+    env_file:
+      - .env
+    volumes:
+      # ホストのbot/をコンテナにマウント → ファイル変更がコンテナに即反映
+      - ./bot:/app
+    # watchmedo が restart をかけるので restart: no にする
+    restart: "no"

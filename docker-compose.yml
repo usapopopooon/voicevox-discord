@@ -1,0 +1,30 @@
+services:
+  voicevox:
+    image: voicevox/voicevox_engine:cpu-latest
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: voicevox_bot
+      POSTGRES_USER: bot
+      POSTGRES_PASSWORD: bot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  discord-bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    environment:
+      VOICEVOX_URL: http://voicevox:50021
+      VOICEVOX_SPEAKER_ID: "3"
+      DATABASE_URL: postgresql://bot:bot@postgres:5432/voicevox_bot
+    depends_on:
+      - voicevox
+      - postgres
+    restart: unless-stopped
+
+volumes:
+  pgdata:

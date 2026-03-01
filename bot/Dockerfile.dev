@@ -1,0 +1,27 @@
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libopus-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 本番 + 開発依存を両方インストール
+COPY requirements.txt requirements.dev.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements.dev.txt
+
+# コードはvolumeマウントで上書きされるため
+# ここではダミーコピーにとどめる（イメージビルド用）
+COPY . .
+
+# watchmedo で bot.py の変更を検知して自動再起動
+# --polling は macOS/Windows の Docker Desktop でファイルイベントが
+# 届かない場合の安全策（Linux環境では外してもよい）
+CMD ["watchmedo", "auto-restart", \
+     "--directory=./", \
+     "--pattern=*.py", \
+     "--recursive", \
+     "--debug-force-polling", \
+     "--", \
+     "python", "bot.py"]
