@@ -380,6 +380,26 @@ async def join(interaction: discord.Interaction):
         logger.error(f"接続挨拶の音声合成エラー: {e}")
 
 
+@client.event
+async def on_voice_state_update(
+    member: discord.Member,
+    before: discord.VoiceState,
+    after: discord.VoiceState,
+):
+    vc = member.guild.voice_client
+    if not vc or not vc.is_connected():
+        return
+
+    # Bot以外のメンバーがいなくなったら自動切断
+    members = [m for m in vc.channel.members if not m.bot]
+    if not members:
+        guild_id = member.guild.id
+        await vc.disconnect()
+        queues.pop(guild_id, None)
+        read_channels.pop(guild_id, None)
+        logger.info(f"全員退出のため自動切断 (Guild: {guild_id})")
+
+
 @tree.command(name="leave", description="ボイスチャンネルから切断")
 async def leave(interaction: discord.Interaction):
     if interaction.guild.voice_client:
