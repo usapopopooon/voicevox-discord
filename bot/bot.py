@@ -386,18 +386,42 @@ async def on_voice_state_update(
     before: discord.VoiceState,
     after: discord.VoiceState,
 ):
+    if member.bot:
+        return
+
     vc = member.guild.voice_client
     if not vc or not vc.is_connected():
         return
 
+    guild_id = member.guild.id
+    bot_channel = vc.channel
+
     # Bot以外のメンバーがいなくなったら自動切断
-    members = [m for m in vc.channel.members if not m.bot]
+    members = [m for m in bot_channel.members if not m.bot]
     if not members:
-        guild_id = member.guild.id
         await vc.disconnect()
         queues.pop(guild_id, None)
         read_channels.pop(guild_id, None)
         logger.info(f"全員退出のため自動切断 (Guild: {guild_id})")
+        return
+
+    # BotがいるVCへの入退室を通知
+    joined = before.channel != bot_channel and after.channel == bot_channel
+    left = before.channel == bot_channel and after.channel != bot_channel
+
+    if joined or left:
+        name = member.display_name
+        text = f"{name}さんが入室しました" if joined else f"{name}さんが退室しました"
+        try:
+            settings = get_user_settings(member.id)
+            audio_data = await synthesize(text, settings)
+            if guild_id not in queues:
+                queues[guild_id] = deque()
+            queues[guild_id].append(audio_data)
+            if not vc.is_playing() and not vc.is_paused():
+                await play_next(guild_id, vc)
+        except Exception as e:
+            logger.error(f"入退室通知の音声合成エラー: {e}")
 
 
 @tree.command(name="leave", description="ボイスチャンネルから切断")
