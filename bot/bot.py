@@ -36,8 +36,9 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# ギルドごとの再生キュー
+# ギルドごとの再生キューと読み上げ対象チャンネル
 queues: dict[int, deque] = {}
+read_channels: dict[int, int] = {}  # guild_id -> channel_id
 
 
 @dataclass
@@ -363,6 +364,7 @@ async def join(interaction: discord.Interaction):
         await channel.connect()
 
     queues[interaction.guild.id] = deque()
+    read_channels[interaction.guild.id] = interaction.channel_id
     await interaction.response.send_message(f"「{channel.name}」に接続しました")
 
     # 接続時に音声で挨拶
@@ -383,6 +385,7 @@ async def leave(interaction: discord.Interaction):
     if interaction.guild.voice_client:
         await interaction.guild.voice_client.disconnect()
         queues.pop(interaction.guild.id, None)
+        read_channels.pop(interaction.guild.id, None)
         await interaction.response.send_message("切断しました")
     else:
         await interaction.response.send_message("ボイスチャンネルに接続していません")
@@ -505,8 +508,15 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    vc = message.guild.voice_client if message.guild else None
+    if not message.guild:
+        return
+
+    vc = message.guild.voice_client
     if not vc or not vc.is_connected():
+        return
+
+    # /join を実行したチャンネルのみ読み上げ
+    if read_channels.get(message.guild.id) != message.channel.id:
         return
 
     text = message.clean_content.strip()
