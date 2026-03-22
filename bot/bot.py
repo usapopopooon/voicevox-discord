@@ -73,6 +73,7 @@ guild_mutes: dict[int, set[int]] = {}  # guild_id -> set of muted user_ids
 
 # テキスト前処理用の正規表現
 URL_PATTERN = re.compile(r"https?://\S+")
+EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:(\w+):\d+>")
 MAX_READ_LENGTH = 100
 
@@ -260,7 +261,8 @@ def is_muted(guild_id: int, user_id: int) -> bool:
 
 def clean_text(text: str) -> str:
     """読み上げ用にテキストを前処理する"""
-    text = URL_PATTERN.sub("", text)
+    text = URL_PATTERN.sub("URLしょうりゃく", text)
+    text = EMAIL_PATTERN.sub("メールアドレスしょうりゃく", text)
     text = CUSTOM_EMOJI_PATTERN.sub(r"\1", text)  # カスタム絵文字は名前だけ残す
     return text.strip()
 
