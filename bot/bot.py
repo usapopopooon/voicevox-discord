@@ -632,16 +632,13 @@ async def speaker_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     if not speakers_cache:
         return []
-    filtered = [
-        (sid, name)
-        for sid, name in speakers_cache.items()
-        if current == "" or current.lower() in name.lower()
-    ]
-    filtered.sort(key=lambda x: x[1])
-    return [
-        app_commands.Choice(name=name, value=str(sid))
-        for sid, name in filtered[:25]
-    ]
+    choices = []
+    for sid, name in speakers_cache.items():
+        if current == "" or current.lower() in name.lower():
+            choices.append(app_commands.Choice(name=name, value=str(sid)))
+            if len(choices) >= 25:
+                break
+    return choices
 
 
 @tree.command(name="voice", description="自分の読み上げ音声パラメータを変更")
