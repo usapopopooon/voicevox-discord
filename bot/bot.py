@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import os
+import re
 from collections import deque
 from dataclasses import dataclass
 
@@ -22,11 +23,23 @@ logger = logging.getLogger(__name__)
 
 # 設定（環境変数で切り替え）
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
-VOICEVOX_URL = os.getenv("VOICEVOX_URL", "http://localhost:50021")
-DEFAULT_SPEAKER = int(os.getenv("VOICEVOX_SPEAKER_ID", "3"))
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+DEFAULT_SPEAKER = int(os.getenv("DEFAULT_SPEAKER_ID", "3"))
 
-logger.info(f"VOICEVOX_URL: {VOICEVOX_URL}")
+# 各エンジンの定義（名前, 環境変数, デフォルトURL, IDオフセット）
+# IDオフセットでエンジン間のスピーカーID衝突を回避
+_ENGINE_DEFS = [
+    ("VOICEVOX", "VOICEVOX_URL", "http://localhost:50021", 0),
+    ("COEIROINK", "COEIROINK_URL", "", 10000),
+    ("SHAREVOX", "SHAREVOX_URL", "", 20000),
+]
+ENGINES: list[tuple[str, str, int]] = [  # (name, url, offset)
+    (name, url, offset)
+    for name, env, default, offset in _ENGINE_DEFS
+    if (url := os.getenv(env, default))
+]
+
+logger.info(f"TTS_ENGINES: {[(n, u) for n, u, _ in ENGINES]}")
 logger.info(f"DEFAULT_SPEAKER_ID: {DEFAULT_SPEAKER}")
 
 # Intents設定（message_contentはテキスト読み上げに必須）
@@ -52,8 +65,16 @@ class VoiceSettings:
 
 # メモリキャッシュ
 user_settings: dict[int, VoiceSettings] = {}
-speakers_cache: dict[int, str] = {}
+speakers_cache: dict[int, str] = {}  # global_id -> 表示名
+# global_id -> (engine_url, real_speaker_id)
+speaker_engine: dict[int, tuple[str, int]] = {}
 guild_dicts: dict[int, dict[str, str]] = {}
+guild_mutes: dict[int, set[int]] = {}  # guild_id -> set of muted user_ids
+
+# テキスト前処理用の正規表現
+URL_PATTERN = re.compile(r"https?://\S+")
+CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:(\w+):\d+>")
+MAX_READ_LENGTH = 100
 
 # DB接続プール
 db_pool: asyncpg.Pool | None = None
@@ -92,6 +113,13 @@ async def init_db():
                 word TEXT NOT NULL,
                 reading TEXT NOT NULL,
                 PRIMARY KEY (guild_id, word)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS guild_mutes (
+                guild_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
             )
         """)
     logger.info("DB初期化完了")
@@ -182,27 +210,92 @@ def apply_dict(guild_id: int, text: str) -> str:
     return text
 
 
-# --- VOICEVOX ---
+async def load_guild_mutes():
+    """DBからギルドのミュート設定をメモリにロード"""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT guild_id, user_id FROM guild_mutes")
+    guild_mutes.clear()
+    for row in rows:
+        gid = row["guild_id"]
+        if gid not in guild_mutes:
+            guild_mutes[gid] = set()
+        guild_mutes[gid].add(row["user_id"])
+    logger.info(
+        f"ミュート設定を読み込みました: {sum(len(v) for v in guild_mutes.values())}件"
+    )
+
+
+async def add_mute(guild_id: int, user_id: int):
+    """ミュートを追加"""
+    if guild_id not in guild_mutes:
+        guild_mutes[guild_id] = set()
+    guild_mutes[guild_id].add(user_id)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO guild_mutes (guild_id, user_id) VALUES ($1, $2) "
+            "ON CONFLICT DO NOTHING",
+            guild_id,
+            user_id,
+        )
+
+
+async def remove_mute(guild_id: int, user_id: int):
+    """ミュートを解除"""
+    mutes = guild_mutes.get(guild_id, set())
+    mutes.discard(user_id)
+    if not mutes:
+        guild_mutes.pop(guild_id, None)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM guild_mutes WHERE guild_id = $1 AND user_id = $2",
+            guild_id,
+            user_id,
+        )
+
+
+def is_muted(guild_id: int, user_id: int) -> bool:
+    """ユーザーがミュートされているか"""
+    return user_id in guild_mutes.get(guild_id, set())
+
+
+def clean_text(text: str) -> str:
+    """読み上げ用にテキストを前処理する"""
+    text = URL_PATTERN.sub("", text)
+    text = CUSTOM_EMOJI_PATTERN.sub(r"\1", text)  # カスタム絵文字は名前だけ残す
+    return text.strip()
+
+
+# --- TTS エンジン ---
 
 
 async def fetch_speakers():
-    """VOICEVOXからスピーカー一覧を取得してキャッシュ"""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{VOICEVOX_URL}/speakers") as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-
-    cache = {}
-    for speaker in data:
-        name = speaker["name"]
-        for style in speaker["styles"]:
-            style_name = style["name"]
-            style_id = style["id"]
-            cache[style_id] = f"{name}（{style_name}）"
-
+    """全エンジンからスピーカー一覧を取得して統合キャッシュ"""
     speakers_cache.clear()
-    speakers_cache.update(cache)
-    logger.info(f"スピーカー一覧を取得しました: {len(speakers_cache)}件")
+    speaker_engine.clear()
+
+    async with aiohttp.ClientSession() as session:
+        for engine_name, engine_url, offset in ENGINES:
+            try:
+                async with session.get(f"{engine_url}/speakers") as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+
+                count = 0
+                for speaker in data:
+                    name = speaker["name"]
+                    for style in speaker["styles"]:
+                        real_id = style["id"]
+                        global_id = real_id + offset
+                        label = f"[{engine_name}] {name}（{style['name']}）"
+                        speakers_cache[global_id] = label
+                        speaker_engine[global_id] = (engine_url, real_id)
+                        count += 1
+
+                logger.info(f"スピーカー取得成功: {engine_name} ({count}件)")
+            except Exception as e:
+                logger.warning(f"スピーカー取得失敗: {engine_name}: {e}")
+
+    logger.info(f"スピーカー一覧合計: {len(speakers_cache)}件")
 
 
 def get_user_settings(user_id: int) -> VoiceSettings:
@@ -211,10 +304,13 @@ def get_user_settings(user_id: int) -> VoiceSettings:
 
 
 async def synthesize(text: str, settings: VoiceSettings) -> bytes:
-    """VOICEVOXでテキストを音声合成してwavバイトを返す"""
+    """エンジンでテキストを音声合成してwavバイトを返す"""
+    engine_url, real_id = speaker_engine.get(
+        settings.speaker_id, (ENGINES[0][1], settings.speaker_id)
+    )
     async with aiohttp.ClientSession() as session:
-        params = {"text": text, "speaker": settings.speaker_id}
-        async with session.post(f"{VOICEVOX_URL}/audio_query", params=params) as resp:
+        params = {"text": text, "speaker": real_id}
+        async with session.post(f"{engine_url}/audio_query", params=params) as resp:
             resp.raise_for_status()
             query = await resp.json()
 
@@ -225,8 +321,8 @@ async def synthesize(text: str, settings: VoiceSettings) -> bytes:
         query["volumeScale"] = settings.volume
 
         async with session.post(
-            f"{VOICEVOX_URL}/synthesis",
-            params={"speaker": settings.speaker_id},
+            f"{engine_url}/synthesis",
+            params={"speaker": real_id},
             json=query,
             headers={"Content-Type": "application/json"},
         ) as resp:
@@ -340,6 +436,7 @@ async def on_ready():
     await init_db()
     await load_user_settings()
     await load_guild_dicts()
+    await load_guild_mutes()
     await tree.sync()
     logger.info(f"Botログイン: {client.user} (ID: {client.user.id})")
     logger.info("スラッシュコマンドを同期しました")
@@ -433,6 +530,56 @@ async def leave(interaction: discord.Interaction):
         await interaction.response.send_message("切断しました")
     else:
         await interaction.response.send_message("ボイスチャンネルに接続していません")
+
+
+@tree.command(name="skip", description="現在読み上げ中の音声をスキップ")
+async def skip(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client if interaction.guild else None
+    if not vc or not vc.is_playing():
+        await interaction.response.send_message("再生中の音声はありません")
+        return
+    vc.stop()
+    await interaction.response.send_message("スキップしました")
+
+
+@tree.command(name="mute", description="指定ユーザーの読み上げをミュート")
+@app_commands.describe(user="ミュートするユーザー")
+async def mute_cmd(interaction: discord.Interaction, user: discord.Member):
+    if user.bot:
+        await interaction.response.send_message("Botはミュートできません")
+        return
+    await add_mute(interaction.guild.id, user.id)
+    await interaction.response.send_message(f"{user.display_name} をミュートしました")
+
+
+@tree.command(name="unmute", description="指定ユーザーのミュートを解除")
+@app_commands.describe(user="ミュート解除するユーザー")
+async def unmute_cmd(interaction: discord.Interaction, user: discord.Member):
+    if not is_muted(interaction.guild.id, user.id):
+        await interaction.response.send_message(
+            f"{user.display_name} はミュートされていません"
+        )
+        return
+    await remove_mute(interaction.guild.id, user.id)
+    await interaction.response.send_message(
+        f"{user.display_name} のミュートを解除しました"
+    )
+
+
+@tree.command(name="showmute", description="ミュート中のユーザー一覧")
+async def showmute_cmd(interaction: discord.Interaction):
+    mutes = guild_mutes.get(interaction.guild.id, set())
+    if not mutes:
+        await interaction.response.send_message("ミュート中のユーザーはいません")
+        return
+    lines = []
+    for uid in mutes:
+        member = interaction.guild.get_member(uid)
+        name = member.display_name if member else f"ID: {uid}"
+        lines.append(f"  {name}")
+    await interaction.response.send_message(
+        f"ミュート中（{len(mutes)}人）\n" + "\n".join(lines)
+    )
 
 
 @tree.command(name="speaker", description="自分の読み上げキャラクターを変更")
@@ -563,7 +710,11 @@ async def on_message(message: discord.Message):
     if read_channels.get(message.guild.id) != message.channel.id:
         return
 
-    text = message.clean_content.strip()
+    # ミュートされたユーザーは読み上げない
+    if is_muted(message.guild.id, message.author.id):
+        return
+
+    text = clean_text(message.clean_content)
     if not text:
         return
 
@@ -571,8 +722,8 @@ async def on_message(message: discord.Message):
     text = apply_dict(message.guild.id, text)
 
     # 長すぎるメッセージは切り詰め
-    if len(text) > 100:
-        text = text[:100] + "、以下省略"
+    if len(text) > MAX_READ_LENGTH:
+        text = text[:MAX_READ_LENGTH] + "、以下省略"
 
     try:
         settings = get_user_settings(message.author.id)

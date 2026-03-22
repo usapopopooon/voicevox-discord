@@ -3,6 +3,14 @@ services:
     image: voicevox/voicevox_engine:cpu-latest
     restart: unless-stopped
 
+  coeiroink:
+    image: coeiroink/coeiroink_engine
+    restart: unless-stopped
+
+  sharevox:
+    image: sharevox/sharevox_engine:cpu-latest
+    restart: unless-stopped
+
   postgres:
     image: postgres:17-alpine
     environment:
@@ -17,12 +25,18 @@ services:
     build:
       context: ./bot
       dockerfile: Dockerfile
+    env_file:
+      - .env
     environment:
       VOICEVOX_URL: http://voicevox:50021
-      VOICEVOX_SPEAKER_ID: "3"
+      COEIROINK_URL: http://coeiroink:50031
+      SHAREVOX_URL: http://sharevox:50025
+      DEFAULT_SPEAKER_ID: "3"
       DATABASE_URL: postgresql://bot:bot@postgres:5432/voicevox_bot
     depends_on:
       - voicevox
+      - coeiroink
+      - sharevox
       - postgres
     restart: unless-stopped
 

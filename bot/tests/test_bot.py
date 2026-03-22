@@ -120,6 +120,44 @@ class TestApplyDict:
         assert result == "hello"
 
 
+class TestCleanText:
+    def test_removes_urls(self):
+        from bot import clean_text
+
+        assert clean_text("見て https://example.com すごい") == "見て  すごい"
+
+    def test_converts_custom_emoji_to_name(self):
+        from bot import clean_text
+
+        assert clean_text("わーい<:smile:123456>") == "わーいsmile"
+
+    def test_converts_animated_emoji(self):
+        from bot import clean_text
+
+        assert clean_text("<a:dance:789>") == "dance"
+
+    def test_preserves_unicode_emoji(self):
+        from bot import clean_text
+
+        assert clean_text("こんにちは😀") == "こんにちは😀"
+
+    def test_empty_after_clean(self):
+        from bot import clean_text
+
+        assert clean_text("https://example.com") == ""
+
+
+class TestMute:
+    def test_is_muted(self):
+        from bot import guild_mutes, is_muted
+
+        guild_mutes[111] = {222}
+        assert is_muted(111, 222) is True
+        assert is_muted(111, 333) is False
+        assert is_muted(999, 222) is False
+        guild_mutes.pop(111, None)
+
+
 class TestOnMessage:
     async def test_ignores_bot_messages(self):
         from bot import on_message
@@ -129,8 +167,10 @@ class TestOnMessage:
         await on_message(message)
 
     def test_text_truncation(self):
+        from bot import MAX_READ_LENGTH
+
         long_text = "あ" * 150
-        if len(long_text) > 100:
-            long_text = long_text[:100] + "、以下省略"
+        if len(long_text) > MAX_READ_LENGTH:
+            long_text = long_text[:MAX_READ_LENGTH] + "、以下省略"
         assert long_text.endswith("、以下省略")
         assert long_text == "あ" * 100 + "、以下省略"
