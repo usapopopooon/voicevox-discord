@@ -465,30 +465,19 @@ async def join(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="読み上げBot — コマンド一覧",
-        description=f"「{channel.name}」に接続しました\nこのチャンネルのメッセージを読み上げます",
-        color=0x00B0F4,
-    )
-    embed.add_field(
-        name="基本",
-        value=(
-            "`/join` — VCに接続\n`/leave` — VCから切断\n`/skip` — 読み上げをスキップ"
-        ),
-        inline=True,
-    )
-    embed.add_field(
-        name="音声設定",
-        value=("`/speaker` — キャラクター変更\n`/voice` — 話速・音高・抑揚・音量"),
-        inline=True,
-    )
-    embed.add_field(
-        name="その他",
-        value=(
+        description=(
+            f"「{channel.name}」に接続しました\nこのチャンネルのメッセージを読み上げます\n\n"
+            "`/join` — VCに接続\n"
+            "`/leave` — VCから切断\n"
+            "`/skip` — 読み上げをスキップ\n"
+            "`/speaker` — キャラクター変更\n"
+            "`/voice` — 話速・音高・抑揚・音量\n"
             "`/dict` — 読み上げ辞書の管理\n"
             "`/mute` — ユーザーをミュート\n"
             "`/unmute` — ミュート解除\n"
             "`/showmute` — ミュート一覧"
         ),
-        inline=True,
+        color=0x00B0F4,
     )
     await interaction.response.send_message(embed=embed)
 
