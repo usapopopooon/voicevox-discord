@@ -176,6 +176,6 @@ class TestOnMessage:
 
         long_text = "あ" * 150
         if len(long_text) > MAX_READ_LENGTH:
-            long_text = long_text[:MAX_READ_LENGTH] + "、以下省略"
-        assert long_text.endswith("、以下省略")
-        assert long_text == "あ" * 100 + "、以下省略"
+            long_text = long_text[:MAX_READ_LENGTH] + "、いかしょうりゃく"
+        assert long_text.endswith("、いかしょうりゃく")
+        assert long_text == "あ" * 100 + "、いかしょうりゃく"

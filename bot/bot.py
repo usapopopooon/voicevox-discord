@@ -502,7 +502,7 @@ async def join(interaction: discord.Interaction):
     # 接続時に音声で挨拶
     try:
         settings = get_user_settings(interaction.user.id)
-        audio_data = await synthesize("接続しました", settings)
+        audio_data = await synthesize("せつぞくしました", settings)
         vc = interaction.guild.voice_client
         if vc and vc.is_connected():
             queues[interaction.guild.id].append(audio_data)
@@ -543,7 +543,7 @@ async def on_voice_state_update(
 
     if joined or left:
         name = member.display_name
-        text = f"{name}さんが入室しました" if joined else f"{name}さんが退室しました"
+        text = f"{name}さんがにゅうしつしました" if joined else f"{name}さんがたいしつしました"
         try:
             settings = get_user_settings(member.id)
             audio_data = await synthesize(text, settings)
@@ -758,7 +758,7 @@ async def on_message(message: discord.Message):
 
     # 長すぎるメッセージは切り詰め
     if len(text) > MAX_READ_LENGTH:
-        text = text[:MAX_READ_LENGTH] + "、以下省略"
+        text = text[:MAX_READ_LENGTH] + "、いかしょうりゃく"
 
     try:
         settings = get_user_settings(message.author.id)
