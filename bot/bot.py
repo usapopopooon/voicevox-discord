@@ -455,10 +455,26 @@ async def join(interaction: discord.Interaction):
 
     channel = interaction.user.voice.channel
 
-    if interaction.guild.voice_client:
-        await interaction.guild.voice_client.move_to(channel)
-    else:
-        await channel.connect()
+    perms = channel.permissions_for(interaction.guild.me)
+    if not perms.connect:
+        await interaction.response.send_message("そのVCに接続する権限がありません")
+        return
+    if not perms.speak:
+        await interaction.response.send_message("そのVCで発言する権限がありません")
+        return
+    if channel.user_limit and len(channel.members) >= channel.user_limit:
+        if not perms.manage_channels:
+            await interaction.response.send_message("VCの人数制限に達しています")
+            return
+
+    try:
+        if interaction.guild.voice_client:
+            await interaction.guild.voice_client.move_to(channel)
+        else:
+            await channel.connect()
+    except Exception as e:
+        await interaction.response.send_message(f"VCへの接続に失敗しました: {e}")
+        return
 
     queues[interaction.guild.id] = deque()
     read_channels[interaction.guild.id] = interaction.channel_id
