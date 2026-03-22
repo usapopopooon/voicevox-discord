@@ -485,6 +485,7 @@ async def join(interaction: discord.Interaction):
         title="読み上げBot — コマンド一覧",
         description=(
             f"「{channel.name}」に接続しました\nこのチャンネルのメッセージを読み上げます\n\n"
+            "`/vc` — VCに接続/切断（トグル）\n"
             "`/join` — VCに接続\n"
             "`/leave` — VCから切断\n"
             "`/skip` — 読み上げをスキップ\n"
@@ -543,7 +544,10 @@ async def on_voice_state_update(
 
     if joined or left:
         name = member.display_name
-        text = f"{name}さんがにゅうしつしました" if joined else f"{name}さんがたいしつしました"
+        if joined:
+            text = f"{name}さんがにゅうしつしました"
+        else:
+            text = f"{name}さんがたいしつしました"
         try:
             settings = get_user_settings(member.id)
             audio_data = await synthesize(text, settings)
@@ -565,6 +569,17 @@ async def leave(interaction: discord.Interaction):
         await interaction.response.send_message("切断しました")
     else:
         await interaction.response.send_message("ボイスチャンネルに接続していません")
+
+
+@tree.command(name="vc", description="VCに接続/切断をトグル")
+async def vc_toggle(interaction: discord.Interaction):
+    if interaction.guild.voice_client:
+        await interaction.guild.voice_client.disconnect()
+        queues.pop(interaction.guild.id, None)
+        read_channels.pop(interaction.guild.id, None)
+        await interaction.response.send_message("切断しました")
+    else:
+        await join.callback(interaction)
 
 
 @tree.command(name="skip", description="現在読み上げ中の音声をスキップ")

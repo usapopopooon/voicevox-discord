@@ -124,12 +124,14 @@ class TestCleanText:
     def test_removes_urls(self):
         from bot import clean_text
 
-        assert clean_text("見て https://example.com すごい") == "見て URLしょうりゃく すごい"
+        result = clean_text("見て https://example.com すごい")
+        assert result == "見て URLしょうりゃく すごい"
 
     def test_replaces_email(self):
         from bot import clean_text
 
-        assert clean_text("連絡先は test@example.com です") == "連絡先は メールアドレスしょうりゃく です"
+        result = clean_text("連絡先は test@example.com です")
+        assert result == "連絡先は メールアドレスしょうりゃく です"
 
     def test_converts_custom_emoji_to_name(self):
         from bot import clean_text
