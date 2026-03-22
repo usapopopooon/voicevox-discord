@@ -68,6 +68,8 @@ user_settings: dict[int, VoiceSettings] = {}
 speakers_cache: dict[int, str] = {}  # global_id -> 表示名
 # global_id -> (engine_url, real_speaker_id)
 speaker_engine: dict[int, tuple[str, int]] = {}
+# キャラクター名 -> [(global_id, スタイル名)]
+characters: dict[str, list[tuple[int, str]]] = {}
 guild_dicts: dict[int, dict[str, str]] = {}
 guild_mutes: dict[int, set[int]] = {}  # guild_id -> set of muted user_ids
 
@@ -274,6 +276,7 @@ async def fetch_speakers():
     """全エンジンからスピーカー一覧を取得して統合キャッシュ"""
     speakers_cache.clear()
     speaker_engine.clear()
+    characters.clear()
 
     async with aiohttp.ClientSession() as session:
         for engine_name, engine_url, offset in ENGINES:
@@ -284,18 +287,35 @@ async def fetch_speakers():
 
                 count = 0
                 for speaker in data:
-                    name = speaker["name"]
+                    char_name = speaker["name"]
+                    if len(ENGINES) > 1:
+                        char_key = f"[{engine_name}] {char_name}"
+                    else:
+                        char_key = char_name
+                    if char_key not in characters:
+                        characters[char_key] = []
                     for style in speaker["styles"]:
                         real_id = style["id"]
                         global_id = real_id + offset
-                        label = f"[{engine_name}] {name}（{style['name']}）"
+                        style_name = style["name"]
+                        label = f"{char_key}（{style_name}）"
                         speakers_cache[global_id] = label
-                        speaker_engine[global_id] = (engine_url, real_id)
+                        speaker_engine[global_id] = (
+                            engine_url,
+                            real_id,
+                        )
+                        characters[char_key].append(
+                            (global_id, style_name)
+                        )
                         count += 1
 
-                logger.info(f"スピーカー取得成功: {engine_name} ({count}件)")
+                logger.info(
+                    f"スピーカー取得成功: {engine_name} ({count}件)"
+                )
             except Exception as e:
-                logger.warning(f"スピーカー取得失敗: {engine_name}: {e}")
+                logger.warning(
+                    f"スピーカー取得失敗: {engine_name}: {e}"
+                )
 
     logger.info(f"スピーカー一覧合計: {len(speakers_cache)}件")
 
@@ -632,19 +652,62 @@ async def showmute_cmd(interaction: discord.Interaction):
     )
 
 
-@tree.command(name="speaker", description="自分の読み上げキャラクターを変更")
-@app_commands.describe(character="キャラクター名で検索")
-async def speaker(interaction: discord.Interaction, character: str):
-    try:
-        speaker_id = int(character)
-    except ValueError:
-        await interaction.response.send_message("キャラクターの選択が無効です")
-        return
+class CharacterSelect(ui.Select):
+    """キャラクター選択セレクトメニュー"""
 
-    if speakers_cache and speaker_id not in speakers_cache:
-        await interaction.response.send_message("存在しないキャラクターです")
-        return
+    def __init__(self, char_list: list[str], page: int = 0):
+        self.all_chars = char_list
+        self.page = page
+        per_page = 25
+        start = page * per_page
+        options = [
+            discord.SelectOption(label=name[:100], value=name[:100])
+            for name in char_list[start : start + per_page]
+        ]
+        super().__init__(
+            placeholder="キャラクターを選択",
+            options=options,
+        )
 
+    async def callback(self, interaction: discord.Interaction):
+        char_name = self.values[0]
+        styles = characters.get(char_name, [])
+        if len(styles) == 1:
+            # スタイルが1つなら即確定
+            global_id = styles[0][0]
+            await _apply_speaker(interaction, global_id)
+        else:
+            view = ui.View(timeout=60)
+            view.add_item(StyleSelect(styles))
+            await interaction.response.edit_message(
+                content=f"「{char_name}」のスタイルを選択",
+                view=view,
+            )
+
+
+class StyleSelect(ui.Select):
+    """スタイル選択セレクトメニュー"""
+
+    def __init__(self, styles: list[tuple[int, str]]):
+        options = [
+            discord.SelectOption(
+                label=style_name, value=str(global_id)
+            )
+            for global_id, style_name in styles[:25]
+        ]
+        super().__init__(
+            placeholder="スタイルを選択",
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        global_id = int(self.values[0])
+        await _apply_speaker(interaction, global_id)
+
+
+async def _apply_speaker(
+    interaction: discord.Interaction, speaker_id: int
+):
     settings = get_user_settings(interaction.user.id)
     settings = VoiceSettings(
         speaker_id=speaker_id,
@@ -656,22 +719,73 @@ async def speaker(interaction: discord.Interaction, character: str):
     user_settings[interaction.user.id] = settings
     await save_user_setting(interaction.user.id, settings)
     name = speakers_cache.get(speaker_id, f"ID: {speaker_id}")
-    await interaction.response.send_message(f"キャラクターを「{name}」に変更しました")
+    if interaction.response.is_done():
+        await interaction.response.edit_message(
+            content=f"キャラクターを「{name}」に変更しました",
+            view=None,
+        )
+    else:
+        await interaction.response.send_message(
+            f"キャラクターを「{name}」に変更しました"
+        )
 
 
-@speaker.autocomplete("character")
-async def speaker_autocomplete(
-    interaction: discord.Interaction, current: str
-) -> list[app_commands.Choice[str]]:
-    if not speakers_cache:
-        return []
-    choices = []
-    for sid, name in speakers_cache.items():
-        if current == "" or current.lower() in name.lower():
-            choices.append(app_commands.Choice(name=name, value=str(sid)))
-            if len(choices) >= 25:
-                break
-    return choices
+@tree.command(
+    name="speaker", description="自分の読み上げキャラクターを変更"
+)
+async def speaker(interaction: discord.Interaction):
+    if not characters:
+        await interaction.response.send_message(
+            "スピーカー情報がまだ読み込まれていません"
+        )
+        return
+
+    char_list = list(characters.keys())
+    view = ui.View(timeout=60)
+    view.add_item(CharacterSelect(char_list, page=0))
+
+    # 25件超える場合はページボタン追加
+    if len(char_list) > 25:
+        view.add_item(CharPageButton(char_list, page=0))
+
+    await interaction.response.send_message(
+        "キャラクターを選択", view=view
+    )
+
+
+class CharPageButton(ui.Button):
+    """キャラクター一覧の次ページボタン"""
+
+    def __init__(self, char_list: list[str], page: int):
+        self.char_list = char_list
+        self.page = page
+        per_page = 25
+        total_pages = (len(char_list) + per_page - 1) // per_page
+        super().__init__(
+            label=f"次へ ({page + 2}/{total_pages})",
+            style=discord.ButtonStyle.secondary,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        next_page = self.page + 1
+        per_page = 25
+        total_pages = (
+            len(self.char_list) + per_page - 1
+        ) // per_page
+        if next_page >= total_pages:
+            next_page = 0
+
+        view = ui.View(timeout=60)
+        view.add_item(
+            CharacterSelect(self.char_list, page=next_page)
+        )
+        if total_pages > 1:
+            view.add_item(
+                CharPageButton(self.char_list, page=next_page)
+            )
+        await interaction.response.edit_message(
+            content="キャラクターを選択", view=view
+        )
 
 
 @tree.command(name="voice", description="自分の読み上げ音声パラメータを変更")
