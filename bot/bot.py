@@ -304,18 +304,12 @@ async def fetch_speakers():
                             engine_url,
                             real_id,
                         )
-                        characters[char_key].append(
-                            (global_id, style_name)
-                        )
+                        characters[char_key].append((global_id, style_name))
                         count += 1
 
-                logger.info(
-                    f"スピーカー取得成功: {engine_name} ({count}件)"
-                )
+                logger.info(f"スピーカー取得成功: {engine_name} ({count}件)")
             except Exception as e:
-                logger.warning(
-                    f"スピーカー取得失敗: {engine_name}: {e}"
-                )
+                logger.warning(f"スピーカー取得失敗: {engine_name}: {e}")
 
     logger.info(f"スピーカー一覧合計: {len(speakers_cache)}件")
 
@@ -690,9 +684,7 @@ class StyleSelect(ui.Select):
 
     def __init__(self, styles: list[tuple[int, str]]):
         options = [
-            discord.SelectOption(
-                label=style_name, value=str(global_id)
-            )
+            discord.SelectOption(label=style_name, value=str(global_id))
             for global_id, style_name in styles[:25]
         ]
         super().__init__(
@@ -705,9 +697,7 @@ class StyleSelect(ui.Select):
         await _apply_speaker(interaction, global_id)
 
 
-async def _apply_speaker(
-    interaction: discord.Interaction, speaker_id: int
-):
+async def _apply_speaker(interaction: discord.Interaction, speaker_id: int):
     settings = get_user_settings(interaction.user.id)
     settings = VoiceSettings(
         speaker_id=speaker_id,
@@ -730,9 +720,7 @@ async def _apply_speaker(
         )
 
 
-@tree.command(
-    name="speaker", description="自分の読み上げキャラクターを変更"
-)
+@tree.command(name="speaker", description="自分の読み上げキャラクターを変更")
 async def speaker(interaction: discord.Interaction):
     if not characters:
         await interaction.response.send_message(
@@ -748,9 +736,7 @@ async def speaker(interaction: discord.Interaction):
     if len(char_list) > 25:
         view.add_item(CharPageButton(char_list, page=0))
 
-    await interaction.response.send_message(
-        "キャラクターを選択", view=view
-    )
+    await interaction.response.send_message("キャラクターを選択", view=view)
 
 
 class CharPageButton(ui.Button):
@@ -769,23 +755,15 @@ class CharPageButton(ui.Button):
     async def callback(self, interaction: discord.Interaction):
         next_page = self.page + 1
         per_page = 25
-        total_pages = (
-            len(self.char_list) + per_page - 1
-        ) // per_page
+        total_pages = (len(self.char_list) + per_page - 1) // per_page
         if next_page >= total_pages:
             next_page = 0
 
         view = ui.View(timeout=60)
-        view.add_item(
-            CharacterSelect(self.char_list, page=next_page)
-        )
+        view.add_item(CharacterSelect(self.char_list, page=next_page))
         if total_pages > 1:
-            view.add_item(
-                CharPageButton(self.char_list, page=next_page)
-            )
-        await interaction.response.edit_message(
-            content="キャラクターを選択", view=view
-        )
+            view.add_item(CharPageButton(self.char_list, page=next_page))
+        await interaction.response.edit_message(content="キャラクターを選択", view=view)
 
 
 @tree.command(name="voice", description="自分の読み上げ音声パラメータを変更")
