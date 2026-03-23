@@ -77,8 +77,13 @@ voicevox-discord/
 |---|---|
 | `/join` | ユーザーがいるボイスチャンネルに接続 |
 | `/leave` | ボイスチャンネルから切断 |
-| `/speaker` | 読み上げキャラクターを変更（オートコンプリート対応） |
+| `/vc` | VCに接続/切断をトグル |
+| `/speaker <character> [style]` | 読み上げキャラクターを変更（style省略時: ノーマル、オートコンプリート対応） |
 | `/voice` | 音声パラメータを変更（話速・音高・抑揚・音量） |
+| `/skip` | 現在読み上げ中の音声をスキップ |
+| `/mute <user>` | 指定ユーザーの読み上げをミュート |
+| `/unmute <user>` | 指定ユーザーのミュートを解除 |
+| `/showmute` | ミュート中のユーザー一覧 |
 | `/dict` | ギルド辞書の設定（ボタン UI で追加・削除） |
 
 ## データ永続化
@@ -135,7 +140,9 @@ FFmpegPCMAudio で PCM 変換 → ボイスチャンネルで再生
 |---|---|---|
 | `DISCORD_TOKEN` | Discord Bot トークン (必須) | - |
 | `VOICEVOX_URL` | VOICEVOX Engine の URL | `http://localhost:50021` |
-| `VOICEVOX_SPEAKER_ID` | デフォルト Speaker ID | `3` |
+| `COEIROINK_URL` | COEIROINK Engine の URL（省略可） | - |
+| `SHAREVOX_URL` | SHAREVOX Engine の URL（省略可） | - |
+| `DEFAULT_SPEAKER_ID` | デフォルト Speaker ID | `3` |
 | `DATABASE_URL` | PostgreSQL 接続 URL | - |
 
 ## ローカル開発
