@@ -646,58 +646,54 @@ async def showmute_cmd(interaction: discord.Interaction):
     )
 
 
-class CharacterSelect(ui.Select):
-    """キャラクター選択セレクトメニュー"""
-
-    def __init__(self, char_list: list[str], page: int = 0):
-        self.all_chars = char_list
-        self.page = page
-        per_page = 25
-        start = page * per_page
-        options = [
-            discord.SelectOption(label=name[:100], value=name[:100])
-            for name in char_list[start : start + per_page]
-        ]
-        super().__init__(
-            placeholder="キャラクターを選択",
-            options=options,
+@tree.command(name="speaker", description="自分の読み上げキャラクターを変更")
+@app_commands.describe(
+    character="キャラクター名（例: ずんだもん）",
+    style="スタイル名（省略時: ノーマル）",
+)
+async def speaker(
+    interaction: discord.Interaction,
+    character: str,
+    style: str = "ノーマル",
+):
+    if not characters:
+        await interaction.response.send_message(
+            "スピーカー情報がまだ読み込まれていません"
         )
+        return
 
-    async def callback(self, interaction: discord.Interaction):
-        char_name = self.values[0]
-        styles = characters.get(char_name, [])
-        if len(styles) == 1:
-            # スタイルが1つなら即確定
-            global_id = styles[0][0]
-            await _apply_speaker(interaction, global_id)
-        else:
-            view = ui.View(timeout=60)
-            view.add_item(StyleSelect(styles))
-            await interaction.response.edit_message(
-                content=f"「{char_name}」のスタイルを選択",
-                view=view,
-            )
+    # キャラクター名で検索
+    matched_char = None
+    for char_name in characters:
+        if character.lower() in char_name.lower():
+            matched_char = char_name
+            if character.lower() == char_name.lower():
+                break
 
-
-class StyleSelect(ui.Select):
-    """スタイル選択セレクトメニュー"""
-
-    def __init__(self, styles: list[tuple[int, str]]):
-        options = [
-            discord.SelectOption(label=style_name, value=str(global_id))
-            for global_id, style_name in styles[:25]
-        ]
-        super().__init__(
-            placeholder="スタイルを選択",
-            options=options,
+    if not matched_char:
+        await interaction.response.send_message(
+            f"「{character}」に一致するキャラクターが見つかりません"
         )
+        return
 
-    async def callback(self, interaction: discord.Interaction):
-        global_id = int(self.values[0])
-        await _apply_speaker(interaction, global_id)
+    # スタイル名で検索
+    styles = characters[matched_char]
+    matched_style = None
+    for global_id, style_name in styles:
+        if style.lower() in style_name.lower():
+            matched_style = (global_id, style_name)
+            if style.lower() == style_name.lower():
+                break
 
+    if not matched_style:
+        style_names = ", ".join(s[1] for s in styles)
+        await interaction.response.send_message(
+            f"「{matched_char}」にスタイル「{style}」がありません\n"
+            f"利用可能: {style_names}"
+        )
+        return
 
-async def _apply_speaker(interaction: discord.Interaction, speaker_id: int):
+    speaker_id = matched_style[0]
     settings = get_user_settings(interaction.user.id)
     settings = VoiceSettings(
         speaker_id=speaker_id,
@@ -709,61 +705,57 @@ async def _apply_speaker(interaction: discord.Interaction, speaker_id: int):
     user_settings[interaction.user.id] = settings
     await save_user_setting(interaction.user.id, settings)
     name = speakers_cache.get(speaker_id, f"ID: {speaker_id}")
-    if interaction.response.is_done():
-        await interaction.response.edit_message(
-            content=f"キャラクターを「{name}」に変更しました",
-            view=None,
-        )
-    else:
-        await interaction.response.send_message(
-            f"キャラクターを「{name}」に変更しました"
-        )
+    await interaction.response.send_message(f"キャラクターを「{name}」に変更しました")
 
 
-@tree.command(name="speaker", description="自分の読み上げキャラクターを変更")
-async def speaker(interaction: discord.Interaction):
+@speaker.autocomplete("character")
+async def speaker_char_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
     if not characters:
-        await interaction.response.send_message(
-            "スピーカー情報がまだ読み込まれていません"
-        )
-        return
-
-    char_list = list(characters.keys())
-    view = ui.View(timeout=60)
-    view.add_item(CharacterSelect(char_list, page=0))
-
-    # 25件超える場合はページボタン追加
-    if len(char_list) > 25:
-        view.add_item(CharPageButton(char_list, page=0))
-
-    await interaction.response.send_message("キャラクターを選択", view=view)
+        return []
+    choices = []
+    for char_name in characters:
+        if current == "" or current.lower() in char_name.lower():
+            choices.append(app_commands.Choice(name=char_name, value=char_name))
+            if len(choices) >= 25:
+                break
+    return choices
 
 
-class CharPageButton(ui.Button):
-    """キャラクター一覧の次ページボタン"""
+@speaker.autocomplete("style")
+async def speaker_style_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    # 入力中のcharacterオプションを取得
+    char_input = None
+    for opt in interaction.data.get("options", []):
+        if opt["name"] == "character":
+            char_input = opt.get("value", "")
+            break
 
-    def __init__(self, char_list: list[str], page: int):
-        self.char_list = char_list
-        self.page = page
-        per_page = 25
-        total_pages = (len(char_list) + per_page - 1) // per_page
-        super().__init__(
-            label=f"次へ ({page + 2}/{total_pages})",
-            style=discord.ButtonStyle.secondary,
-        )
+    if not char_input or not characters:
+        return []
 
-    async def callback(self, interaction: discord.Interaction):
-        next_page = self.page + 1
-        per_page = 25
-        total_pages = (len(self.char_list) + per_page - 1) // per_page
-        if next_page >= total_pages:
-            next_page = 0
+    # キャラクター名でマッチ
+    matched_char = None
+    for char_name in characters:
+        if char_input.lower() in char_name.lower():
+            matched_char = char_name
+            if char_input.lower() == char_name.lower():
+                break
 
-        view = ui.View(timeout=60)
-        view.add_item(CharacterSelect(self.char_list, page=next_page))
-        if total_pages > 1:
-            view.add_item(CharPageButton(self.char_list, page=next_page))
-        await interaction.response.edit_message(content="キャラクターを選択", view=view)
+    if not matched_char:
+        return []
+
+    styles = characters[matched_char]
+    choices = []
+    for _, style_name in styles:
+        if current == "" or current.lower() in style_name.lower():
+            choices.append(app_commands.Choice(name=style_name, value=style_name))
+            if len(choices) >= 25:
+                break
+    return choices
 
 
 @tree.command(name="voice", description="自分の読み上げ音声パラメータを変更")
