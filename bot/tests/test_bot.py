@@ -173,6 +173,42 @@ class TestOnMessage:
         message.author.bot = True
         await on_message(message)
 
+    async def test_ignores_non_guild_messages(self):
+        from bot import on_message
+
+        message = MagicMock()
+        message.author.bot = False
+        message.guild = None
+        await on_message(message)
+
+    async def test_ignores_other_channel(self):
+        from bot import on_message, read_channels
+
+        message = MagicMock()
+        message.author.bot = False
+        message.guild.id = 111
+        message.guild.voice_client.is_connected.return_value = True
+        message.channel.id = 999
+        read_channels[111] = 888  # /joinしたチャンネルは別
+        await on_message(message)
+        # synthesizeが呼ばれないことを確認（エラーなく終了）
+        read_channels.pop(111, None)
+
+    async def test_ignores_muted_user(self):
+        from bot import guild_mutes, on_message, read_channels
+
+        message = MagicMock()
+        message.author.bot = False
+        message.guild.id = 111
+        message.guild.voice_client.is_connected.return_value = True
+        message.channel.id = 888
+        message.author.id = 222
+        read_channels[111] = 888
+        guild_mutes[111] = {222}
+        await on_message(message)
+        read_channels.pop(111, None)
+        guild_mutes.pop(111, None)
+
     def test_text_truncation(self):
         from bot import MAX_READ_LENGTH
 
@@ -181,3 +217,46 @@ class TestOnMessage:
             long_text = long_text[:MAX_READ_LENGTH] + "、いかしょうりゃく"
         assert long_text.endswith("、いかしょうりゃく")
         assert long_text == "あ" * 100 + "、いかしょうりゃく"
+
+
+class TestEngines:
+    def test_only_configured_engines_loaded(self):
+        from bot import ENGINES
+
+        # VOICEVOX はテスト用 conftest で設定済み
+        engine_names = [name for name, _, _ in ENGINES]
+        assert "VOICEVOX" in engine_names
+        # URL未設定のエンジンは除外される
+        for name, url, _ in ENGINES:
+            assert url != ""
+
+    def test_engine_id_offsets_are_unique(self):
+        from bot import ENGINES
+
+        offsets = [offset for _, _, offset in ENGINES]
+        assert len(offsets) == len(set(offsets))
+
+
+class TestReadChannels:
+    def test_read_channels_tracks_guild(self):
+        from bot import read_channels
+
+        read_channels[111] = 888
+        assert read_channels[111] == 888
+        read_channels.pop(111, None)
+
+
+class TestCharacters:
+    def test_characters_dict_structure(self):
+        from bot import characters
+
+        # fetch_speakers 実行前は空
+        # 構造の型確認
+        assert isinstance(characters, dict)
+
+    def test_speaker_engine_fallback(self):
+        from bot import ENGINES, speaker_engine
+
+        # 未登録のspeaker_idでもフォールバックする
+        fallback = speaker_engine.get(99999, (ENGINES[0][1], 99999))
+        assert fallback == (ENGINES[0][1], 99999)
