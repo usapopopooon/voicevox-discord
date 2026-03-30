@@ -862,6 +862,12 @@ async def on_message(message: discord.Message):
     try:
         settings = get_user_settings(message.author.id)
         audio_data = await synthesize(text, settings)
+    except aiohttp.ClientError:
+        logger.warning("音声合成エンジンに接続できません（再起動中の可能性）")
+        await message.channel.send(
+            "音声エンジンに接続できません。しばらくお待ちください。"
+        )
+        return
     except Exception as e:
         logger.error(f"音声合成エラー: {e}")
         return

@@ -1,6 +1,10 @@
 services:
   voicevox:
     image: voicevox/voicevox_engine:cpu-latest
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     restart: unless-stopped
 
   # coeiroink:
