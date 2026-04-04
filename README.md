@@ -1,0 +1,63 @@
+# VOICEVOX 読み上げ Discord Bot
+
+Discord のテキストチャンネルのメッセージを VOICEVOX の音声でボイスチャンネルに読み上げる Bot です。
+
+## 機能
+
+- テキストチャンネルのメッセージを自動読み上げ
+- ユーザーごとにキャラクター・話速・音高・抑揚・音量を設定可能
+- ギルドごとの読み上げ辞書（単語→読みの置換）
+- ユーザーのミュート機能
+- VC の入退室通知
+- 全員退出時の自動切断
+- URL・メールアドレスの自動省略
+- 複数エンジン対応（VOICEVOX / COEIROINK / SHAREVOX）
+
+## コマンド一覧
+
+| コマンド | 説明 |
+|---|---|
+| `/join` | ボイスチャンネルに接続 |
+| `/leave` | ボイスチャンネルから切断 |
+| `/vc` | 接続/切断をトグル |
+| `/speaker <character> [style]` | 読み上げキャラクターを変更（style 省略時: ノーマル） |
+| `/voice` | 話速・音高・抑揚・音量を変更 |
+| `/skip` | 現在の読み上げをスキップ |
+| `/dict` | 読み上げ辞書の設定 |
+| `/mute <user>` | ユーザーの読み上げをミュート |
+| `/unmute <user>` | ミュートを解除 |
+| `/showmute` | ミュート中のユーザー一覧 |
+
+## ローカル開発
+
+```bash
+cp .env.example .env
+# .env に DISCORD_TOKEN を記入
+docker compose up
+```
+
+## Railway デプロイ
+
+1. Railway で新規プロジェクト作成
+2. PostgreSQL プラグインを追加
+3. VOICEVOX サービスを追加（Docker Image: `voicevox/voicevox_engine:cpu-latest`）
+   - Internal Networking を有効化
+4. Bot サービスを追加（GitHub リポジトリ連携、Root Directory: `bot/`）
+5. Bot の環境変数を設定:
+   - `DISCORD_TOKEN` — Discord Developer Portal から取得
+   - `VOICEVOX_URL` — `http://<voicevoxサービス名>.railway.internal:50021`
+   - `DATABASE_URL` — PostgreSQL プラグインから自動注入
+
+## 技術スタック
+
+- Python 3.12 / discord.py (voice)
+- VOICEVOX Engine (CPU版)
+- PostgreSQL + asyncpg
+- Docker Compose (ローカル) / Railway (本番)
+- GitHub Actions (ruff + pytest)
+
+詳細は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照してください。
+
+## クレジット
+
+> VOICEVOX:ずんだもん
