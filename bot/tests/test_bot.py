@@ -1451,8 +1451,9 @@ class TestJoinCommand:
 
         await join.callback(interaction)
         interaction.response.send_message.assert_awaited_once()
-        assert "Botの権限情報を取得できません" in (
-            interaction.response.send_message.await_args.args[0]
+        assert (
+            "Botの権限情報を取得できません"
+            in (interaction.response.send_message.await_args.args[0])
         )
 
 
