@@ -186,10 +186,20 @@ class TestCleanText:
 
         assert clean_text("<a:dance:789>") == "dance"
 
-    def test_preserves_unicode_emoji(self):
+    def test_replaces_unicode_emoji(self):
         from bot import clean_text
 
-        assert clean_text("こんにちは😀") == "こんにちは😀"
+        assert clean_text("こんにちは😀") == "こんにちはにこにこ"
+
+    def test_preserves_unknown_unicode_emoji(self):
+        from bot import clean_text
+
+        assert clean_text("こんにちは🫩") == "こんにちは🫩"
+
+    def test_replaces_western_emoticon(self):
+        from bot import clean_text
+
+        assert clean_text("hello :)") == "hello にっこり"
 
     def test_empty_after_clean(self):
         from bot import clean_text

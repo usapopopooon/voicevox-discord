@@ -220,6 +220,22 @@ def _clean_text_replace(m: re.Match[str]) -> str:
 # kaomoji.json に含まれない素朴な基本形を補完する curated dict。
 # Wikipedia の顔文字ページや一般的な日本語利用で頻出するものを中心に選定。
 _BASIC_KAOMOJI: dict[str, str] = {
+    # 横向き（Western）顔文字
+    ":-)": "にっこり",
+    ":)": "にっこり",
+    ":-D": "えがお",
+    ":D": "えがお",
+    ";-)": "ういんく",
+    ";)": "ういんく",
+    ":-P": "てへぺろ",
+    ":P": "てへぺろ",
+    ":-(": "しょんぼり",
+    ":(": "しょんぼり",
+    ":'-(": "なく",
+    ":'(": "なく",
+    "XD": "だいわらい",
+    "xD": "だいわらい",
+    "<3": "はーと",
     # 笑顔・喜び
     "(^_^)": "にっこり",
     "(^-^)": "にっこり",
@@ -338,6 +354,58 @@ def _replace_kaomoji(text: str) -> str:
     if _KAOMOJI_PATTERN is None:
         return text
     return _KAOMOJI_PATTERN.sub(lambda m: _KAOMOJI_DICT[m.group(0)], text)
+
+
+# 高頻度 Unicode 絵文字の読み替え。必要最小限に絞ってコストを抑える。
+_UNICODE_EMOJI_READING: dict[str, str] = {
+    "😀": "にこにこ",
+    "😁": "にっこり",
+    "😂": "わらい",
+    "🤣": "ばくわら",
+    "😆": "わらい",
+    "😊": "えがお",
+    "😍": "だいすき",
+    "😘": "ちゅ",
+    "🥰": "だいすき",
+    "😉": "ういんく",
+    "🤔": "うーん",
+    "😢": "かなしい",
+    "😭": "おおなき",
+    "😡": "おこる",
+    "😱": "びっくり",
+    "😴": "ねむい",
+    "🥺": "うるうる",
+    "🙏": "おねがい",
+    "🙇": "ぺこり",
+    "👍": "ぐっど",
+    "👎": "だめ",
+    "👏": "ぱちぱち",
+    "🙌": "ばんざい",
+    "💯": "ひゃくてん",
+    "🔥": "あつい",
+    "✨": "きらきら",
+    "🎉": "おめでとう",
+    "❤️": "はーと",
+    "❤": "はーと",
+    "💕": "はーと",
+    "💖": "はーと",
+    "💔": "しょっく",
+    "💤": "ねむい",
+}
+_UNICODE_EMOJI_PATTERN: re.Pattern[str] | None = re.compile(
+    "|".join(
+        re.escape(k) for k in sorted(_UNICODE_EMOJI_READING, key=len, reverse=True)
+    )
+)
+
+
+def _replace_unicode_emoji(text: str) -> str:
+    """高頻度 Unicode 絵文字を読み仮名に置換する。"""
+    if _UNICODE_EMOJI_PATTERN is None:
+        return text
+    return _UNICODE_EMOJI_PATTERN.sub(
+        lambda m: _UNICODE_EMOJI_READING[m.group(0)], text
+    )
 
 
 # DB接続プール
@@ -664,8 +732,9 @@ def is_muted(guild_id: int, user_id: int) -> bool:
 
 def clean_text(text: str) -> str:
     """読み上げ用にテキストを前処理する。
-    顔文字（長一致優先）→ URL/メール/カスタム絵文字 の順で置換する。"""
+    顔文字（長一致優先）→ Unicode絵文字 → URL/メール/カスタム絵文字 の順で置換する。"""
     text = _replace_kaomoji(text)
+    text = _replace_unicode_emoji(text)
     return _CLEAN_TEXT_PATTERN.sub(_clean_text_replace, text).strip()
 
 
