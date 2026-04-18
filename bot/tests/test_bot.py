@@ -1094,7 +1094,7 @@ class TestOnMessageMore:
     async def test_synthesize_connection_error_notifies(self):
         import aiohttp
 
-        from bot import on_message, read_channels
+        from bot import engine_error_notified_at, on_message, read_channels
 
         msg = _make_message(guild_id=10006, content="接続エラーテスト")
         msg.channel.send = AsyncMock()
@@ -1109,7 +1109,32 @@ class TestOnMessageMore:
                 await on_message(msg)
             finally:
                 read_channels.pop(10006, None)
+                engine_error_notified_at.pop(10006, None)
         # ClientError パスはユーザー通知あり
+        msg.channel.send.assert_awaited_once()
+
+    async def test_synthesize_connection_error_is_rate_limited(self):
+        import aiohttp
+
+        from bot import engine_error_notified_at, on_message, read_channels
+
+        msg = _make_message(guild_id=10008, content="接続エラーテスト")
+        msg.channel.send = AsyncMock()
+        read_channels[10008] = msg.channel.id
+
+        with aioresponses() as m:
+            m.post(
+                re.compile(r".*audio_query.*"),
+                exception=aiohttp.ClientConnectionError("down"),
+                repeat=True,
+            )
+            try:
+                await on_message(msg)
+                await on_message(msg)
+            finally:
+                read_channels.pop(10008, None)
+                engine_error_notified_at.pop(10008, None)
+        # 連続失敗しても通知は1回
         msg.channel.send.assert_awaited_once()
 
     @patch("discord.FFmpegPCMAudio")
@@ -1272,6 +1297,45 @@ class TestOnVoiceStateUpdate:
             # 例外は外に出ない
             await on_voice_state_update(member, before, after)
 
+    async def test_bot_disconnect_cleans_guild_state(self):
+        from bot import (
+            client,
+            engine_error_notified_at,
+            on_voice_state_update,
+            play_locks,
+            queues,
+            read_channels,
+        )
+
+        original_user = client._connection.user
+        client._connection.user = MagicMock(id=4242)
+
+        member = MagicMock()
+        member.bot = True
+        member.id = 4242
+        member.guild.id = 5005
+        before = MagicMock()
+        before.channel = MagicMock()
+        after = MagicMock()
+        after.channel = None
+
+        queues[5005] = deque([b"audio"])
+        read_channels[5005] = 100
+        play_locks[5005] = MagicMock()
+        engine_error_notified_at[5005] = 1.0
+        try:
+            await on_voice_state_update(member, before, after)
+            assert 5005 not in queues
+            assert 5005 not in read_channels
+            assert 5005 not in play_locks
+            assert 5005 not in engine_error_notified_at
+        finally:
+            client._connection.user = original_user
+            queues.pop(5005, None)
+            read_channels.pop(5005, None)
+            play_locks.pop(5005, None)
+            engine_error_notified_at.pop(5005, None)
+
 
 class TestJoinCommand:
     async def test_user_not_in_voice(self):
@@ -1351,6 +1415,45 @@ class TestJoinCommand:
         await join.callback(interaction)
         msg = interaction.response.send_message.await_args.args[0]
         assert "VCへの接続に失敗" in msg
+
+    async def test_clears_stale_queue_on_join(self):
+        from bot import join, queues
+
+        interaction = _make_interaction(guild_id=9001, user_id=9002)
+        channel = MagicMock()
+        channel.user_limit = 0
+        perms = MagicMock()
+        perms.connect = True
+        perms.speak = True
+        channel.permissions_for.return_value = perms
+        channel.connect = AsyncMock()
+        interaction.user.voice = MagicMock()
+        interaction.user.voice.channel = channel
+        interaction.guild.voice_client = None
+
+        queues[9001] = deque([b"stale-audio"])
+        with patch("bot.synthesize", new=AsyncMock(return_value=b"hi")):
+            await join.callback(interaction)
+        assert 9001 in queues
+        # 旧キューが破棄される（このモックでは接続後vc未セットなので挨拶は積まれない）
+        assert len(queues[9001]) == 0
+        queues.pop(9001, None)
+
+    async def test_rejects_when_bot_member_unavailable(self):
+        from bot import join
+
+        interaction = _make_interaction(guild_id=9101)
+        interaction.guild.me = None
+        interaction.guild.get_member = MagicMock(return_value=None)
+        channel = MagicMock()
+        interaction.user.voice = MagicMock()
+        interaction.user.voice.channel = channel
+
+        await join.callback(interaction)
+        interaction.response.send_message.assert_awaited_once()
+        assert "Botの権限情報を取得できません" in (
+            interaction.response.send_message.await_args.args[0]
+        )
 
 
 class TestSpeakerAutocomplete:

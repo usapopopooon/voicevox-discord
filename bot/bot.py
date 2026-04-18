@@ -54,6 +54,8 @@ tree = app_commands.CommandTree(client)
 queues: dict[int, deque] = {}
 read_channels: dict[int, int] = {}  # guild_id -> channel_id
 play_locks: dict[int, asyncio.Lock] = {}  # guild_id -> 再生開始の競合防止ロック
+engine_error_notified_at: dict[int, float] = {}  # guild_id -> monotonic seconds
+ENGINE_ERROR_NOTIFY_INTERVAL = 30.0
 
 
 @dataclass
@@ -570,7 +572,16 @@ async def join(interaction: discord.Interaction):
 
     channel = interaction.user.voice.channel
 
-    perms = channel.permissions_for(interaction.guild.me)
+    me = interaction.guild.me
+    if me is None and client.user is not None:
+        me = interaction.guild.get_member(client.user.id)
+    if me is None:
+        await interaction.response.send_message(
+            "Botの権限情報を取得できませんでした。しばらく待ってから再試行してください"
+        )
+        return
+
+    perms = channel.permissions_for(me)
     if not perms.connect:
         await interaction.response.send_message("そのVCに接続する権限がありません")
         return
@@ -591,7 +602,7 @@ async def join(interaction: discord.Interaction):
         await interaction.response.send_message(f"VCへの接続に失敗しました: {e}")
         return
 
-    queues.setdefault(interaction.guild.id, deque())
+    queues[interaction.guild.id] = deque()
     read_channels[interaction.guild.id] = interaction.channel_id
 
     embed = discord.Embed(
@@ -633,6 +644,14 @@ async def on_voice_state_update(
     after: discord.VoiceState,
 ):
     if member.bot:
+        if client.user and member.id == client.user.id and after.channel is None:
+            guild_id = member.guild.id
+            queues.pop(guild_id, None)
+            read_channels.pop(guild_id, None)
+            play_locks.pop(guild_id, None)
+            engine_error_notified_at.pop(guild_id, None)
+            return
+
         # Bot自身の再接続時、キューが残っていれば再生を再開する
         if client.user and member.id == client.user.id and after.channel is not None:
             guild_id = member.guild.id
@@ -662,6 +681,7 @@ async def on_voice_state_update(
         queues.pop(guild_id, None)
         read_channels.pop(guild_id, None)
         play_locks.pop(guild_id, None)
+        engine_error_notified_at.pop(guild_id, None)
         logger.info(f"全員退出のため自動切断 (Guild: {guild_id})")
         return
 
@@ -708,6 +728,7 @@ async def leave(interaction: discord.Interaction):
         queues.pop(interaction.guild.id, None)
         read_channels.pop(interaction.guild.id, None)
         play_locks.pop(interaction.guild.id, None)
+        engine_error_notified_at.pop(interaction.guild.id, None)
         await interaction.response.send_message("切断しました")
     else:
         await interaction.response.send_message("ボイスチャンネルに接続していません")
@@ -720,6 +741,7 @@ async def vc_toggle(interaction: discord.Interaction):
         queues.pop(interaction.guild.id, None)
         read_channels.pop(interaction.guild.id, None)
         play_locks.pop(interaction.guild.id, None)
+        engine_error_notified_at.pop(interaction.guild.id, None)
         await interaction.response.send_message("切断しました")
     else:
         await join.callback(interaction)
@@ -997,9 +1019,14 @@ async def on_message(message: discord.Message):
         audio_data = await synthesize(text, settings)
     except aiohttp.ClientError:
         logger.warning("音声合成エンジンに接続できません（再起動中の可能性）")
-        await message.channel.send(
-            "音声エンジンに接続できません。しばらくお待ちください。"
-        )
+        guild_id = message.guild.id
+        now = time.monotonic()
+        last = engine_error_notified_at.get(guild_id, 0.0)
+        if now - last >= ENGINE_ERROR_NOTIFY_INTERVAL:
+            engine_error_notified_at[guild_id] = now
+            await message.channel.send(
+                "音声エンジンに接続できません。しばらくお待ちください。"
+            )
         return
     except Exception as e:
         logger.error(f"音声合成エラー: {e}")
