@@ -191,6 +191,11 @@ class TestCleanText:
 
         assert clean_text("こんにちは😀") == "こんにちはにこにこ"
 
+    def test_replaces_unicode_emoji_with_skin_tone(self):
+        from bot import clean_text
+
+        assert clean_text("こんにちは👍🏻") == "こんにちはぐっど"
+
     def test_preserves_unknown_unicode_emoji(self):
         from bot import clean_text
 
@@ -200,6 +205,38 @@ class TestCleanText:
         from bot import clean_text
 
         assert clean_text("hello :)") == "hello にっこり"
+
+    def test_replaces_jp_net_slang_w(self):
+        from bot import clean_text
+
+        assert clean_text("それなwww") == "それなわらい"
+        assert clean_text("それなｗｗ") == "それなわらい"
+
+    def test_replaces_jp_net_slang_kusa(self):
+        from bot import clean_text
+
+        assert clean_text("草") == "わらい"
+
+    def test_does_not_replace_western_emoticon_inside_word(self):
+        from bot import clean_text
+
+        assert clean_text("C:D") == "C:D"
+
+    def test_does_not_replace_www_inside_domain(self):
+        from bot import clean_text
+
+        assert clean_text("www.example.com") == "www.example.com"
+
+    def test_does_not_replace_single_no_character(self):
+        from bot import clean_text
+
+        assert clean_text("ノート") == "ノート"
+
+    def test_replaces_added_japanese_kaomoji(self):
+        from bot import clean_text
+
+        assert clean_text("やった＼(^o^)／") == "やったばんざい"
+        assert clean_text("つらい(´；ω；｀)") == "つらいなく"
 
     def test_empty_after_clean(self):
         from bot import clean_text

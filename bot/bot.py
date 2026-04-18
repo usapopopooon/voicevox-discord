@@ -220,22 +220,6 @@ def _clean_text_replace(m: re.Match[str]) -> str:
 # kaomoji.json に含まれない素朴な基本形を補完する curated dict。
 # Wikipedia の顔文字ページや一般的な日本語利用で頻出するものを中心に選定。
 _BASIC_KAOMOJI: dict[str, str] = {
-    # 横向き（Western）顔文字
-    ":-)": "にっこり",
-    ":)": "にっこり",
-    ":-D": "えがお",
-    ":D": "えがお",
-    ";-)": "ういんく",
-    ";)": "ういんく",
-    ":-P": "てへぺろ",
-    ":P": "てへぺろ",
-    ":-(": "しょんぼり",
-    ":(": "しょんぼり",
-    ":'-(": "なく",
-    ":'(": "なく",
-    "XD": "だいわらい",
-    "xD": "だいわらい",
-    "<3": "はーと",
     # 笑顔・喜び
     "(^_^)": "にっこり",
     "(^-^)": "にっこり",
@@ -251,6 +235,10 @@ _BASIC_KAOMOJI: dict[str, str] = {
     "(*´ω`*)": "にこにこ",
     "(*´∀`*)": "にこにこ",
     "(´∀`)": "にっこり",
+    "(＾ω＾)": "にっこり",
+    "(・∀・)": "にっこり",
+    "＼(^o^)／": "ばんざい",
+    "٩(ˊᗜˋ*)و": "わーい",
     # 困惑・汗
     "(^_^;)": "あせ",
     "(^^;)": "あせ",
@@ -267,6 +255,9 @@ _BASIC_KAOMOJI: dict[str, str] = {
     "( ;∀;)": "なく",
     "(´Д⊂ヽ": "なく",
     "(>_<)": "つらい",
+    "(つд⊂)": "なく",
+    "(´；ω；｀)": "なく",
+    "(；ω；)": "なく",
     # 驚き
     "Σ(ﾟдﾟ)": "びっくり",
     "(ﾟДﾟ)": "びっくり",
@@ -279,6 +270,9 @@ _BASIC_KAOMOJI: dict[str, str] = {
     "(#゚Д゚)": "おこる",
     "(-_-#)": "おこる",
     "(ಠ_ಠ)": "じとー",
+    "(｀・ω・´)": "きりっ",
+    "(｀・∀・´)": "きりっ",
+    "(๑•̀ㅂ•́)و✧": "がんばる",
     # お辞儀・謝る
     "m(_ _)m": "ぺこり",
     "m(__)m": "ぺこり",
@@ -294,22 +288,51 @@ _BASIC_KAOMOJI: dict[str, str] = {
     "( ´・ω・`)": "うーん",
     "(´・ω・)": "うーん",
     "(・ω・)": "うーん",
+    "(*ﾉωﾉ)": "てれ",
+    "( ˙꒳˙ )": "ふむ",
     "(´_ゝ`)": "ふーん",
     "(´Д`)": "はぁ",
+    "¯\\_(ツ)_/¯": "やれやれ",
     "orz": "がっくり",
     "OTZ": "がっくり",
     "OTL": "がっくり",
     # 笑い（ネットスラング）
-    "www": "わらい",
     "(笑)": "わらい",
     "(爆)": "ばくわら",
     "(苦笑)": "くわら",
     # 挨拶・手振り
     "(^_^)/": "ばいばい",
     "ノシ": "ばいばい",
-    "ノ": "はーい",
     "(´◡`)": "にっこり",
 }
+
+# 横向き（Western）顔文字は「語中誤爆」を避けるため境界付きで別処理する。
+_WESTERN_EMOTICON_READING: dict[str, str] = {
+    ":-)": "にっこり",
+    ":)": "にっこり",
+    ":-D": "えがお",
+    ":D": "えがお",
+    ";-)": "ういんく",
+    ";)": "ういんく",
+    ":-P": "てへぺろ",
+    ":P": "てへぺろ",
+    ":-(": "しょんぼり",
+    ":(": "しょんぼり",
+    ":'-(": "なく",
+    ":'(": "なく",
+    "XD": "だいわらい",
+    "xD": "だいわらい",
+    "<3": "はーと",
+}
+_WESTERN_EMOTICON_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(?P<emo>"
+    + "|".join(
+        re.escape(k) for k in sorted(_WESTERN_EMOTICON_READING, key=len, reverse=True)
+    )
+    + r")"
+    r"(?![A-Za-z0-9])"
+)
 
 
 # 顔文字辞書（kao-utf8.json から読み込み、annotation を読み仮名として使う）。
@@ -356,6 +379,31 @@ def _replace_kaomoji(text: str) -> str:
     return _KAOMOJI_PATTERN.sub(lambda m: _KAOMOJI_DICT[m.group(0)], text)
 
 
+def _replace_western_emoticon(text: str) -> str:
+    """横向き顔文字を境界付きで置換する（語中の :D などは誤変換しない）。"""
+    return _WESTERN_EMOTICON_PATTERN.sub(
+        lambda m: _WESTERN_EMOTICON_READING[m.group("emo")], text
+    )
+
+
+# 日本語圏のネットスラング（笑い表現）
+_JP_NET_SLANG_PATTERN = re.compile(
+    r"(?P<kusa>(?<![\w.])草+(?![\w.]))"
+    r"|(?P<w>(?<![A-Za-z0-9.])[wｗ]{2,}(?![A-Za-z0-9.]))"
+)
+
+
+def _replace_jp_net_slang(text: str) -> str:
+    """日本語ネットスラング（草 / www / ｗｗ）を読み仮名に置換する。"""
+
+    def _repl(m: re.Match[str]) -> str:
+        if m.group("kusa") is not None:
+            return "わらい"
+        return "わらい"
+
+    return _JP_NET_SLANG_PATTERN.sub(_repl, text)
+
+
 # 高頻度 Unicode 絵文字の読み替え。必要最小限に絞ってコストを抑える。
 _UNICODE_EMOJI_READING: dict[str, str] = {
     "😀": "にこにこ",
@@ -397,6 +445,7 @@ _UNICODE_EMOJI_PATTERN: re.Pattern[str] | None = re.compile(
         re.escape(k) for k in sorted(_UNICODE_EMOJI_READING, key=len, reverse=True)
     )
 )
+_EMOJI_SKIN_TONE_MODIFIER_PATTERN = re.compile(r"[\U0001F3FB-\U0001F3FF]")
 
 
 def _replace_unicode_emoji(text: str) -> str:
@@ -406,6 +455,11 @@ def _replace_unicode_emoji(text: str) -> str:
     return _UNICODE_EMOJI_PATTERN.sub(
         lambda m: _UNICODE_EMOJI_READING[m.group(0)], text
     )
+
+
+def _normalize_emoji_modifiers(text: str) -> str:
+    """絵文字肌色修飾子を除去して読み上げノイズを抑える。"""
+    return _EMOJI_SKIN_TONE_MODIFIER_PATTERN.sub("", text)
 
 
 # DB接続プール
@@ -732,9 +786,14 @@ def is_muted(guild_id: int, user_id: int) -> bool:
 
 def clean_text(text: str) -> str:
     """読み上げ用にテキストを前処理する。
-    顔文字（長一致優先）→ Unicode絵文字 → URL/メール/カスタム絵文字 の順で置換する。"""
+    顔文字（長一致優先）→ 横向き顔文字（境界付き）→ 日本語ネットスラング
+    → Unicode絵文字
+    → 肌色修飾子正規化 → URL/メール/カスタム絵文字 の順で置換する。"""
     text = _replace_kaomoji(text)
+    text = _replace_western_emoticon(text)
+    text = _replace_jp_net_slang(text)
     text = _replace_unicode_emoji(text)
+    text = _normalize_emoji_modifiers(text)
     return _CLEAN_TEXT_PATTERN.sub(_clean_text_replace, text).strip()
 
 
