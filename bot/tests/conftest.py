@@ -20,3 +20,13 @@ def default_speaker_registered(env_setup):
     bot.speaker_engine.setdefault(3, ("http://test-voicevox:50021", 3))
     yield
     # 後片付けはテスト側の try/finally 任せ（fetch_speakers 系テストが clear する）
+
+
+@pytest.fixture(autouse=True)
+def clear_candidate_backoff(env_setup):
+    """候補バックオフ状態はテスト間で独立させる。"""
+    import bot
+
+    bot._candidate_fail_until.clear()
+    yield
+    bot._candidate_fail_until.clear()

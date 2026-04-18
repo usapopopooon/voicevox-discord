@@ -767,17 +767,11 @@ async def _run_candidates(
                 f"speaker={cand.real_id}, error={e}"
             )
 
-    # 全候補がバックオフ中で 1 つも試行しなかった → 先頭候補を強制プローブ
+    # 全候補がバックオフ中で 1 つも試行しなかった場合は、
+    # 追加のネットワークアクセスをせず即時失敗として返す。
+    # （障害時の過密リトライ抑制）
     if not attempted:
-        cand = candidates[0]
-        try:
-            return await _try_candidate(cand, text, settings, primary_key)
-        except (aiohttp.ClientError, TimeoutError) as e:
-            last_error = e
-            logger.warning(
-                f"音声合成候補失敗（プローブ）: reason={cand.reason}, "
-                f"engine={cand.engine_url}, speaker={cand.real_id}, error={e}"
-            )
+        raise aiohttp.ClientConnectionError("音声合成候補はバックオフ中です")
 
     if last_error is not None:
         raise last_error

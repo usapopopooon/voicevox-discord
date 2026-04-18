@@ -2592,6 +2592,35 @@ class TestSynthesizeCache:
             bot._candidate_fail_until.clear()
             bot._candidate_fail_until.update(original_fail)
 
+    async def test_all_candidates_in_backoff_do_not_probe_network(self):
+        import bot
+        from bot import VoiceSettings, synthesize
+
+        original_map = dict(bot.speaker_engine)
+        original_fail = dict(bot._candidate_fail_until)
+        try:
+            bot.speaker_engine.clear()
+            bot._candidate_fail_until.clear()
+            bot.speaker_engine[777] = ("http://bad-a:50021", 7)
+            bot.speaker_engine[3] = ("http://bad-b:50021", 3)
+            future = bot.time.monotonic() + 60.0
+            for engine_url, real_id in {
+                ("http://bad-a:50021", 7),
+                ("http://bad-b:50021", 3),
+                ("http://test-voicevox:50021", 3),
+            }:
+                bot._candidate_fail_until[(engine_url, real_id)] = future
+
+            with patch("bot._synthesize_with_candidate", new=AsyncMock()) as mocked_syn:
+                with pytest.raises(aiohttp.ClientError, match="バックオフ中"):
+                    await synthesize("テスト", VoiceSettings(speaker_id=777))
+                mocked_syn.assert_not_awaited()
+        finally:
+            bot.speaker_engine.clear()
+            bot.speaker_engine.update(original_map)
+            bot._candidate_fail_until.clear()
+            bot._candidate_fail_until.update(original_fail)
+
     async def test_fallback_caches_under_primary_key_too(self, monkeypatch):
         """primary 候補が失敗して fallback で成功した時、
         primary キーでも引けるように二重キャッシュされること"""
