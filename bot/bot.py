@@ -53,6 +53,7 @@ tree = app_commands.CommandTree(client)
 # ギルドごとの再生キューと読み上げ対象チャンネル
 queues: dict[int, deque] = {}
 read_channels: dict[int, int] = {}  # guild_id -> channel_id
+play_locks: dict[int, asyncio.Lock] = {}  # guild_id -> 再生開始の競合防止ロック
 
 
 @dataclass
@@ -85,6 +86,13 @@ db_pool: asyncpg.Pool | None = None
 db_init_lock = asyncio.Lock()
 
 
+def _require_db_pool() -> asyncpg.Pool:
+    """db_pool が初期化されているか確認して返す"""
+    if db_pool is None:
+        raise RuntimeError("DB接続プールが未初期化です（on_ready完了前の可能性）")
+    return db_pool
+
+
 # --- DB ---
 
 
@@ -104,7 +112,9 @@ async def init_db():
                 break
             except (OSError, asyncpg.PostgresError) as e:
                 if attempt < 4:
-                    logger.warning(f"DB接続失敗 ({attempt + 1}/5): {e}、2秒後にリトライ")
+                    logger.warning(
+                        f"DB接続失敗 ({attempt + 1}/5): {e}、2秒後にリトライ"
+                    )
                     await asyncio.sleep(2)
                 else:
                     raise
@@ -154,8 +164,7 @@ async def init_db():
                         f'ALTER TABLE user_settings DROP CONSTRAINT "{pk_name}"'
                     )
                 await conn.execute(
-                    "ALTER TABLE user_settings "
-                    "ADD PRIMARY KEY (guild_id, user_id)"
+                    "ALTER TABLE user_settings ADD PRIMARY KEY (guild_id, user_id)"
                 )
 
             await conn.execute("""
@@ -178,7 +187,7 @@ async def init_db():
 
 async def load_user_settings():
     """DBからユーザー設定をメモリにロード"""
-    async with db_pool.acquire() as conn:
+    async with _require_db_pool().acquire() as conn:
         rows = await conn.fetch(
             "SELECT guild_id, user_id, speaker_id, speed, pitch, intonation, volume "
             "FROM user_settings"
@@ -197,7 +206,7 @@ async def load_user_settings():
 
 async def save_user_setting(guild_id: int, user_id: int, settings: VoiceSettings):
     """ユーザー設定を1件DBに保存"""
-    async with db_pool.acquire() as conn:
+    async with _require_db_pool().acquire() as conn:
         await conn.execute(
             """
             INSERT INTO user_settings
@@ -218,7 +227,7 @@ async def save_user_setting(guild_id: int, user_id: int, settings: VoiceSettings
 
 async def load_guild_dicts():
     """DBからギルドの辞書設定をメモリにロード"""
-    async with db_pool.acquire() as conn:
+    async with _require_db_pool().acquire() as conn:
         rows = await conn.fetch("SELECT guild_id, word, reading FROM guild_dicts")
     guild_dicts.clear()
     for row in rows:
@@ -231,7 +240,7 @@ async def load_guild_dicts():
 
 async def add_dict_entry(guild_id: int, word: str, reading: str):
     """辞書エントリを1件DBに保存"""
-    async with db_pool.acquire() as conn:
+    async with _require_db_pool().acquire() as conn:
         await conn.execute(
             """
             INSERT INTO guild_dicts (guild_id, word, reading)
@@ -246,7 +255,7 @@ async def add_dict_entry(guild_id: int, word: str, reading: str):
 
 async def delete_dict_entry(guild_id: int, word: str):
     """辞書エントリを1件DBから削除"""
-    async with db_pool.acquire() as conn:
+    async with _require_db_pool().acquire() as conn:
         await conn.execute(
             "DELETE FROM guild_dicts WHERE guild_id = $1 AND word = $2",
             guild_id,
@@ -255,16 +264,19 @@ async def delete_dict_entry(guild_id: int, word: str):
 
 
 def apply_dict(guild_id: int, text: str) -> str:
-    """テキストに辞書の置換を適用する"""
+    """テキストに辞書の置換を適用する（1パスで行い連鎖置換を防ぐ）"""
     d = guild_dicts.get(guild_id, {})
-    for word, reading in d.items():
-        text = text.replace(word, reading)
-    return text
+    if not d:
+        return text
+    # 長い単語を優先してマッチさせる
+    words_sorted = sorted(d.keys(), key=len, reverse=True)
+    pattern = re.compile("|".join(re.escape(w) for w in words_sorted))
+    return pattern.sub(lambda m: d[m.group(0)], text)
 
 
 async def load_guild_mutes():
     """DBからギルドのミュート設定をメモリにロード"""
-    async with db_pool.acquire() as conn:
+    async with _require_db_pool().acquire() as conn:
         rows = await conn.fetch("SELECT guild_id, user_id FROM guild_mutes")
     guild_mutes.clear()
     for row in rows:
@@ -282,7 +294,7 @@ async def add_mute(guild_id: int, user_id: int):
     if guild_id not in guild_mutes:
         guild_mutes[guild_id] = set()
     guild_mutes[guild_id].add(user_id)
-    async with db_pool.acquire() as conn:
+    async with _require_db_pool().acquire() as conn:
         await conn.execute(
             "INSERT INTO guild_mutes (guild_id, user_id) VALUES ($1, $2) "
             "ON CONFLICT DO NOTHING",
@@ -297,7 +309,7 @@ async def remove_mute(guild_id: int, user_id: int):
     mutes.discard(user_id)
     if not mutes:
         guild_mutes.pop(guild_id, None)
-    async with db_pool.acquire() as conn:
+    async with _require_db_pool().acquire() as conn:
         await conn.execute(
             "DELETE FROM guild_mutes WHERE guild_id = $1 AND user_id = $2",
             guild_id,
@@ -377,9 +389,19 @@ async def synthesize(text: str, settings: VoiceSettings) -> bytes:
     if not ENGINES:
         raise RuntimeError("TTSエンジンが設定されていません")
 
-    engine_url, real_id = speaker_engine.get(
-        settings.speaker_id, (ENGINES[0][1], settings.speaker_id)
-    )
+    # speaker_id はオフセット加算後の global_id。
+    # キャッシュに無い場合、そのまま実IDとして投げるとオフセット分ずれた音声や
+    # 存在しないIDになるため、DEFAULT_SPEAKER にフォールバックする。
+    engine_info = speaker_engine.get(settings.speaker_id)
+    if engine_info is None:
+        logger.warning(
+            f"speaker_id {settings.speaker_id} がキャッシュに無いため "
+            f"DEFAULT_SPEAKER({DEFAULT_SPEAKER}) を使用"
+        )
+        engine_info = speaker_engine.get(
+            DEFAULT_SPEAKER, (ENGINES[0][1], DEFAULT_SPEAKER)
+        )
+    engine_url, real_id = engine_info
     async with aiohttp.ClientSession() as session:
         params = {"text": text, "speaker": real_id}
         async with session.post(f"{engine_url}/audio_query", params=params) as resp:
@@ -404,27 +426,42 @@ async def synthesize(text: str, settings: VoiceSettings) -> bytes:
 
 async def play_next(guild_id: int, vc: discord.VoiceClient):
     """キューから次の音声を再生する"""
-    if not vc.is_connected():
-        return
+    lock = play_locks.setdefault(guild_id, asyncio.Lock())
+    async with lock:
+        if not vc.is_connected():
+            return
+        # すでに再生中なら after_play 経由で次が呼ばれるので何もしない
+        if vc.is_playing() or vc.is_paused():
+            return
 
-    queue = queues.get(guild_id, deque())
-    if not queue:
-        return
+        queue = queues.get(guild_id, deque())
+        if not queue:
+            return
 
-    audio_data = queue.popleft()
-    audio_buffer = io.BytesIO(audio_data)
+        audio_data = queue.popleft()
+        audio_buffer = io.BytesIO(audio_data)
 
-    source = discord.FFmpegPCMAudio(audio_buffer, pipe=True)
+        source = discord.FFmpegPCMAudio(audio_buffer, pipe=True)
 
-    def after_play(error):
-        if error:
-            logger.error(f"再生エラー: {error}")
-        asyncio.run_coroutine_threadsafe(play_next(guild_id, vc), client.loop)
+        def after_play(error):
+            if error:
+                logger.error(f"再生エラー: {error}")
+            future = asyncio.run_coroutine_threadsafe(
+                play_next(guild_id, vc), client.loop
+            )
 
-    try:
-        vc.play(source, after=after_play)
-    except discord.ClientException as e:
-        logger.warning(f"再生スキップ（接続切断済み）: {e}")
+            def _log_future_exception(fut):
+                try:
+                    fut.result()
+                except Exception as exc:
+                    logger.error(f"次の再生でエラー: {exc}")
+
+            future.add_done_callback(_log_future_exception)
+
+        try:
+            vc.play(source, after=after_play)
+        except discord.ClientException as e:
+            logger.warning(f"再生スキップ（接続切断済み）: {e}")
 
 
 # --- 辞書UI ---
@@ -554,7 +591,7 @@ async def join(interaction: discord.Interaction):
         await interaction.response.send_message(f"VCへの接続に失敗しました: {e}")
         return
 
-    queues[interaction.guild.id] = deque()
+    queues.setdefault(interaction.guild.id, deque())
     read_channels[interaction.guild.id] = interaction.channel_id
 
     embed = discord.Embed(
@@ -624,6 +661,7 @@ async def on_voice_state_update(
         await vc.disconnect()
         queues.pop(guild_id, None)
         read_channels.pop(guild_id, None)
+        play_locks.pop(guild_id, None)
         logger.info(f"全員退出のため自動切断 (Guild: {guild_id})")
         return
 
@@ -669,6 +707,7 @@ async def leave(interaction: discord.Interaction):
         await interaction.guild.voice_client.disconnect()
         queues.pop(interaction.guild.id, None)
         read_channels.pop(interaction.guild.id, None)
+        play_locks.pop(interaction.guild.id, None)
         await interaction.response.send_message("切断しました")
     else:
         await interaction.response.send_message("ボイスチャンネルに接続していません")
@@ -680,6 +719,7 @@ async def vc_toggle(interaction: discord.Interaction):
         await interaction.guild.voice_client.disconnect()
         queues.pop(interaction.guild.id, None)
         read_channels.pop(interaction.guild.id, None)
+        play_locks.pop(interaction.guild.id, None)
         await interaction.response.send_message("切断しました")
     else:
         await join.callback(interaction)
@@ -751,13 +791,15 @@ async def speaker(
         )
         return
 
-    # キャラクター名で検索
+    # キャラクター名で検索（完全一致優先、無ければ最初の部分一致）
     matched_char = None
+    query = character.lower()
     for char_name in characters:
-        if character.lower() in char_name.lower():
+        if query == char_name.lower():
             matched_char = char_name
-            if character.lower() == char_name.lower():
-                break
+            break
+        if matched_char is None and query in char_name.lower():
+            matched_char = char_name
 
     if not matched_char:
         await interaction.response.send_message(
@@ -765,14 +807,16 @@ async def speaker(
         )
         return
 
-    # スタイル名で検索
+    # スタイル名で検索（完全一致優先、無ければ最初の部分一致）
     styles = characters[matched_char]
     matched_style = None
+    style_query = style.lower()
     for global_id, style_name in styles:
-        if style.lower() in style_name.lower():
+        if style_query == style_name.lower():
             matched_style = (global_id, style_name)
-            if style.lower() == style_name.lower():
-                break
+            break
+        if matched_style is None and style_query in style_name.lower():
+            matched_style = (global_id, style_name)
 
     if not matched_style:
         style_names = ", ".join(s[1] for s in styles)
