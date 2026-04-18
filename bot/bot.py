@@ -14,6 +14,7 @@ import asyncpg
 import discord
 from discord import app_commands, ui
 from dotenv import load_dotenv
+from kaomoji_builtin import KAOMOJI_DICT as _BUILTIN_KAOMOJI_DICT
 
 load_dotenv()
 
@@ -335,34 +336,13 @@ _WESTERN_EMOTICON_PATTERN = re.compile(
 )
 
 
-# 顔文字辞書（kao-utf8.json から読み込み、annotation を読み仮名として使う）。
-# 長い顔文字を優先マッチさせるため、キーは文字数降順でソートして正規表現化する。
-def _load_kaomoji_dict() -> dict[str, str]:
-    """bot/kaomoji.json + 基本形 curated dict を合成した face→annotation を返す"""
-    import json
-    from pathlib import Path
-
-    result: dict[str, str] = {}
-    path = Path(__file__).parent / "kaomoji.json"
-    try:
-        with path.open(encoding="utf-8") as f:
-            entries = json.load(f)
-        for entry in entries:
-            face = entry.get("face")
-            annotation = entry.get("annotation")
-            if isinstance(face, str) and isinstance(annotation, str) and face:
-                result.setdefault(face, annotation)
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning(f"顔文字辞書の読み込みに失敗: {e}")
-
-    # curated な基本形を優先（上書き可能）。辞書ファイル側の long-form と
-    # 重複しにくいシンプル形を中心に登録している。
-    for face, annotation in _BASIC_KAOMOJI.items():
-        result[face] = annotation
-    return result
-
-
-_KAOMOJI_DICT: dict[str, str] = _load_kaomoji_dict()
+# 顔文字辞書（ビルドイン）。
+# もともと kaomoji.json で管理していた辞書をコード内に同梱し、
+# 起動時ファイルI/Oをなくしてデプロイ環境依存を減らす。
+_KAOMOJI_DICT: dict[str, str] = dict(_BUILTIN_KAOMOJI_DICT)
+# curated な基本形を優先（上書き可能）。ビルドイン辞書側の long-form と
+# 重複しにくいシンプル形を中心に登録している。
+_KAOMOJI_DICT.update(_BASIC_KAOMOJI)
 if _KAOMOJI_DICT:
     _KAOMOJI_PATTERN: re.Pattern[str] | None = re.compile(
         "|".join(re.escape(k) for k in sorted(_KAOMOJI_DICT, key=len, reverse=True))
