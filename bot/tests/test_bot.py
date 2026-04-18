@@ -370,6 +370,23 @@ class TestApplyDictAdditional:
 
 
 class TestPlayNextAdditional:
+    async def test_state_check_client_exception_skips(self):
+        import discord
+
+        from bot import play_locks, play_next, queues
+
+        mock_vc = MagicMock()
+        mock_vc.is_connected.side_effect = discord.ClientException(
+            "Not connected to voice."
+        )
+        queues[1000] = deque([b"audio"])
+        await play_next(1000, mock_vc)
+        mock_vc.play.assert_not_called()
+        # 状態確認で失敗した場合、キューは消費しない
+        assert len(queues[1000]) == 1
+        queues.pop(1000, None)
+        play_locks.pop(1000, None)
+
     async def test_not_connected_skips(self):
         from bot import play_locks, play_next, queues
 
@@ -754,6 +771,16 @@ def _make_interaction(guild_id=111, user_id=222, channel_id=333):
 
 
 class TestSimpleCommands:
+    async def test_skip_rejects_dm(self):
+        from bot import skip
+
+        interaction = _make_interaction()
+        interaction.guild = None
+        await skip.callback(interaction)
+        interaction.response.send_message.assert_awaited_once_with(
+            "このコマンドはサーバー内でのみ利用できます"
+        )
+
     async def test_skip_no_playback(self):
         from bot import skip
 
@@ -1380,6 +1407,16 @@ class TestOnVoiceStateUpdate:
 
 
 class TestJoinCommand:
+    async def test_rejects_dm(self):
+        from bot import join
+
+        interaction = _make_interaction()
+        interaction.guild = None
+        await join.callback(interaction)
+        interaction.response.send_message.assert_awaited_once_with(
+            "このコマンドはサーバー内でのみ利用できます"
+        )
+
     async def test_user_not_in_voice(self):
         from bot import join
 
@@ -1567,6 +1604,14 @@ class TestSpeakerAutocomplete:
         finally:
             bot.characters.pop("A", None)
             bot.characters.pop("B", None)
+
+    async def test_style_autocomplete_handles_missing_interaction_data(self):
+        from bot import speaker_style_autocomplete
+
+        interaction = MagicMock()
+        interaction.data = None
+        result = await speaker_style_autocomplete(interaction, "")
+        assert result == []
 
     async def test_style_autocomplete_no_character_input(self):
         from bot import speaker_style_autocomplete

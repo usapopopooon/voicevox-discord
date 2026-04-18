@@ -81,12 +81,38 @@ def _cleanup_guild_state(guild_id: int) -> None:
     engine_error_notified_at.pop(guild_id, None)
 
 
+def _can_start_playback(vc: discord.VoiceClient) -> bool:
+    """再生開始可能な VC 状態かを安全に判定する。
+
+    接続状態の遷移レースで discord.ClientException が出ることがあるため、
+    その場合は再生不可として扱う。
+    """
+    try:
+        return vc.is_connected() and not vc.is_playing() and not vc.is_paused()
+    except discord.ClientException as e:
+        logger.info(f"VC状態確認をスキップ（接続遷移中）: {e}")
+        return False
+
+
 async def _safe_disconnect(vc: discord.VoiceClient) -> None:
     """VC切断。既に切断済みなどで例外が出ても無視する。"""
     try:
         await vc.disconnect()
     except Exception as e:
         logger.warning(f"切断でエラー: {e}")
+
+
+async def _require_guild_interaction(
+    interaction: discord.Interaction,
+) -> discord.Guild | None:
+    """ギルド内コマンドかを確認し、DM実行時はメッセージを返して中断する。"""
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "このコマンドはサーバー内でのみ利用できます"
+        )
+        return None
+    return guild
 
 
 @dataclass
@@ -598,10 +624,8 @@ async def play_next(guild_id: int, vc: discord.VoiceClient):
     """キューから次の音声を再生する"""
     lock = play_locks.setdefault(guild_id, asyncio.Lock())
     async with lock:
-        if not vc.is_connected():
-            return
-        # すでに再生中なら after_play 経由で次が呼ばれるので何もしない
-        if vc.is_playing() or vc.is_paused():
+        # 既に切断済み・再生中・一時停止中なら何もしない
+        if not _can_start_playback(vc):
             return
 
         queue = queues.get(guild_id)
@@ -726,15 +750,19 @@ async def on_ready():
 
 @tree.command(name="join", description="ボイスチャンネルに接続")
 async def join(interaction: discord.Interaction):
+    guild = await _require_guild_interaction(interaction)
+    if guild is None:
+        return
+
     if not interaction.user.voice:
         await interaction.response.send_message("先にボイスチャンネルに入ってください")
         return
 
     channel = interaction.user.voice.channel
 
-    me = interaction.guild.me
+    me = guild.me
     if me is None and client.user is not None:
-        me = interaction.guild.get_member(client.user.id)
+        me = guild.get_member(client.user.id)
     if me is None:
         await interaction.response.send_message(
             "Botの権限情報を取得できませんでした。しばらく待ってから再試行してください"
@@ -753,10 +781,10 @@ async def join(interaction: discord.Interaction):
             await interaction.response.send_message("VCの人数制限に達しています")
             return
 
-    was_connected = interaction.guild.voice_client is not None
+    was_connected = guild.voice_client is not None
     try:
         if was_connected:
-            await interaction.guild.voice_client.move_to(channel)
+            await guild.voice_client.move_to(channel)
         else:
             await channel.connect()
     except Exception as e:
@@ -765,11 +793,11 @@ async def join(interaction: discord.Interaction):
 
     if was_connected:
         # move_to の場合: 既存キュー（未再生の音声）は保持
-        _ensure_queue(interaction.guild.id)
+        _ensure_queue(guild.id)
     else:
         # 新規接続: 切断クリーンアップ漏れ等で残存する古いキューを破棄
-        queues[interaction.guild.id] = deque()
-    read_channels[interaction.guild.id] = interaction.channel_id
+        queues[guild.id] = deque()
+    read_channels[guild.id] = interaction.channel_id
 
     embed = discord.Embed(
         title="読み上げBot — コマンド一覧",
@@ -792,13 +820,13 @@ async def join(interaction: discord.Interaction):
 
     # 接続時に音声で挨拶
     try:
-        settings = get_user_settings(interaction.guild.id, interaction.user.id)
+        settings = get_user_settings(guild.id, interaction.user.id)
         audio_data = await synthesize("せつぞくしました", settings, cache=True)
-        vc = interaction.guild.voice_client
+        vc = guild.voice_client
         if vc and vc.is_connected():
-            queues[interaction.guild.id].append(audio_data)
-            if not vc.is_playing() and not vc.is_paused():
-                await play_next(interaction.guild.id, vc)
+            queues[guild.id].append(audio_data)
+            if _can_start_playback(vc):
+                await play_next(guild.id, vc)
     except Exception as e:
         logger.error(f"接続挨拶の音声合成エラー: {e}")
 
@@ -822,13 +850,7 @@ async def on_voice_state_update(
             # Bot 自身の再接続 → 残キューがあれば再生再開
             vc = member.guild.voice_client
             queue = queues.get(guild_id)
-            if (
-                vc
-                and vc.is_connected()
-                and queue
-                and not vc.is_playing()
-                and not vc.is_paused()
-            ):
+            if vc and queue and _can_start_playback(vc):
                 await play_next(guild_id, vc)
         return
 
@@ -872,7 +894,7 @@ async def on_voice_state_update(
 
             _ensure_queue(guild_id).append(audio_data)
 
-            if not vc.is_playing() and not vc.is_paused():
+            if _can_start_playback(vc):
                 await play_next(guild_id, vc)
         except discord.ClientException:
             # 退出直後の race で "Not connected to voice." が起こり得る
@@ -883,9 +905,13 @@ async def on_voice_state_update(
 
 @tree.command(name="leave", description="ボイスチャンネルから切断")
 async def leave(interaction: discord.Interaction):
-    if interaction.guild.voice_client:
-        await _safe_disconnect(interaction.guild.voice_client)
-        _cleanup_guild_state(interaction.guild.id)
+    guild = await _require_guild_interaction(interaction)
+    if guild is None:
+        return
+
+    if guild.voice_client:
+        await _safe_disconnect(guild.voice_client)
+        _cleanup_guild_state(guild.id)
         await interaction.response.send_message("切断しました")
     else:
         await interaction.response.send_message("ボイスチャンネルに接続していません")
@@ -893,9 +919,13 @@ async def leave(interaction: discord.Interaction):
 
 @tree.command(name="vc", description="VCに接続/切断をトグル")
 async def vc_toggle(interaction: discord.Interaction):
-    if interaction.guild.voice_client:
-        await _safe_disconnect(interaction.guild.voice_client)
-        _cleanup_guild_state(interaction.guild.id)
+    guild = await _require_guild_interaction(interaction)
+    if guild is None:
+        return
+
+    if guild.voice_client:
+        await _safe_disconnect(guild.voice_client)
+        _cleanup_guild_state(guild.id)
         await interaction.response.send_message("切断しました")
     else:
         await join.callback(interaction)
@@ -903,33 +933,52 @@ async def vc_toggle(interaction: discord.Interaction):
 
 @tree.command(name="skip", description="現在読み上げ中の音声をスキップ")
 async def skip(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client if interaction.guild else None
-    if not vc or not vc.is_playing():
+    guild = await _require_guild_interaction(interaction)
+    if guild is None:
+        return
+
+    vc = guild.voice_client
+    if not vc:
         await interaction.response.send_message("再生中の音声はありません")
         return
-    vc.stop()
+    try:
+        if not vc.is_playing():
+            await interaction.response.send_message("再生中の音声はありません")
+            return
+        vc.stop()
+    except discord.ClientException:
+        await interaction.response.send_message("再生中の音声はありません")
+        return
     await interaction.response.send_message("スキップしました")
 
 
 @tree.command(name="mute", description="指定ユーザーの読み上げをミュート")
 @app_commands.describe(user="ミュートするユーザー")
 async def mute_cmd(interaction: discord.Interaction, user: discord.Member):
+    guild = await _require_guild_interaction(interaction)
+    if guild is None:
+        return
+
     if user.bot:
         await interaction.response.send_message("Botはミュートできません")
         return
-    await add_mute(interaction.guild.id, user.id)
+    await add_mute(guild.id, user.id)
     await interaction.response.send_message(f"{user.display_name} をミュートしました")
 
 
 @tree.command(name="unmute", description="指定ユーザーのミュートを解除")
 @app_commands.describe(user="ミュート解除するユーザー")
 async def unmute_cmd(interaction: discord.Interaction, user: discord.Member):
-    if not is_muted(interaction.guild.id, user.id):
+    guild = await _require_guild_interaction(interaction)
+    if guild is None:
+        return
+
+    if not is_muted(guild.id, user.id):
         await interaction.response.send_message(
             f"{user.display_name} はミュートされていません"
         )
         return
-    await remove_mute(interaction.guild.id, user.id)
+    await remove_mute(guild.id, user.id)
     await interaction.response.send_message(
         f"{user.display_name} のミュートを解除しました"
     )
@@ -937,13 +986,17 @@ async def unmute_cmd(interaction: discord.Interaction, user: discord.Member):
 
 @tree.command(name="showmute", description="ミュート中のユーザー一覧")
 async def showmute_cmd(interaction: discord.Interaction):
-    mutes = guild_mutes.get(interaction.guild.id, set())
+    guild = await _require_guild_interaction(interaction)
+    if guild is None:
+        return
+
+    mutes = guild_mutes.get(guild.id, set())
     if not mutes:
         await interaction.response.send_message("ミュート中のユーザーはいません")
         return
     lines = []
     for uid in mutes:
-        member = interaction.guild.get_member(uid)
+        member = guild.get_member(uid)
         name = member.display_name if member else f"ID: {uid}"
         lines.append(f"  {name}")
     await interaction.response.send_message(
@@ -961,6 +1014,10 @@ async def speaker(
     character: str,
     style: str = "ノーマル",
 ):
+    guild = await _require_guild_interaction(interaction)
+    if guild is None:
+        return
+
     if not characters:
         await interaction.response.send_message(
             "スピーカー情報がまだ読み込まれていません"
@@ -1003,7 +1060,7 @@ async def speaker(
         return
 
     speaker_id = matched_style[0]
-    settings = get_user_settings(interaction.guild.id, interaction.user.id)
+    settings = get_user_settings(guild.id, interaction.user.id)
     settings = VoiceSettings(
         speaker_id=speaker_id,
         speed=settings.speed,
@@ -1011,8 +1068,8 @@ async def speaker(
         intonation=settings.intonation,
         volume=settings.volume,
     )
-    user_settings[(interaction.guild.id, interaction.user.id)] = settings
-    await save_user_setting(interaction.guild.id, interaction.user.id, settings)
+    user_settings[(guild.id, interaction.user.id)] = settings
+    await save_user_setting(guild.id, interaction.user.id, settings)
     name = speakers_cache.get(speaker_id, f"ID: {speaker_id}")
     await interaction.response.send_message(f"キャラクターを「{name}」に変更しました")
 
@@ -1038,7 +1095,8 @@ async def speaker_style_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     # 入力中のcharacterオプションを取得
     char_input = None
-    for opt in interaction.data.get("options", []):
+    data = interaction.data if isinstance(interaction.data, dict) else {}
+    for opt in data.get("options", []):
         if opt["name"] == "character":
             char_input = opt.get("value", "")
             break
@@ -1081,7 +1139,11 @@ async def voice(
     intonation: float | None = None,
     volume: float | None = None,
 ):
-    settings = get_user_settings(interaction.guild.id, interaction.user.id)
+    guild = await _require_guild_interaction(interaction)
+    if guild is None:
+        return
+
+    settings = get_user_settings(guild.id, interaction.user.id)
 
     # 指定されたパラメータのみ更新
     new_speed = settings.speed if speed is None else max(0.5, min(2.0, speed))
@@ -1113,8 +1175,8 @@ async def voice(
         intonation=new_intonation,
         volume=new_volume,
     )
-    user_settings[(interaction.guild.id, interaction.user.id)] = new_settings
-    await save_user_setting(interaction.guild.id, interaction.user.id, new_settings)
+    user_settings[(guild.id, interaction.user.id)] = new_settings
+    await save_user_setting(guild.id, interaction.user.id, new_settings)
 
     changed = []
     if speed is not None:
@@ -1133,7 +1195,11 @@ async def voice(
 
 @tree.command(name="dict", description="読み上げ辞書の設定")
 async def dict_cmd(interaction: discord.Interaction):
-    content, view = build_dict_message(interaction.guild.id)
+    guild = await _require_guild_interaction(interaction)
+    if guild is None:
+        return
+
+    content, view = build_dict_message(guild.id)
     await interaction.response.send_message(content=content, view=view)
 
 
@@ -1189,7 +1255,7 @@ async def on_message(message: discord.Message):
     guild_id = message.guild.id
     _ensure_queue(guild_id).append(audio_data)
 
-    if not vc.is_playing() and not vc.is_paused():
+    if _can_start_playback(vc):
         await play_next(guild_id, vc)
 
 
@@ -1200,6 +1266,8 @@ MAX_LOGIN_RETRIES = 5
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN environment variable is required")
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL environment variable is required")
     if not ENGINES:
         raise RuntimeError("VOICEVOX_URL など、少なくとも1つのTTSエンジンURLが必要です")
 
