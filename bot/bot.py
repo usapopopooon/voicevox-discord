@@ -65,7 +65,7 @@ class VoiceSettings:
 
 
 # メモリキャッシュ
-user_settings: dict[int, VoiceSettings] = {}
+user_settings: dict[tuple[int, int], VoiceSettings] = {}
 speakers_cache: dict[int, str] = {}  # global_id -> 表示名
 # global_id -> (engine_url, real_speaker_id)
 speaker_engine: dict[int, tuple[str, int]] = {}
@@ -82,6 +82,7 @@ MAX_READ_LENGTH = 100
 
 # DB接続プール
 db_pool: asyncpg.Pool | None = None
+db_init_lock = asyncio.Lock()
 
 
 # --- DB ---
@@ -90,55 +91,101 @@ db_pool: asyncpg.Pool | None = None
 async def init_db():
     """DB接続プールを作成し、テーブルを初期化する（リトライあり）"""
     global db_pool
-    for attempt in range(5):
-        try:
-            db_pool = await asyncpg.create_pool(DATABASE_URL)
-            break
-        except (OSError, asyncpg.PostgresError) as e:
-            if attempt < 4:
-                logger.warning(f"DB接続失敗 ({attempt + 1}/5): {e}、2秒後にリトライ")
-                await asyncio.sleep(2)
-            else:
-                raise
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_settings (
-                user_id BIGINT PRIMARY KEY,
-                speaker_id INTEGER NOT NULL DEFAULT 3,
-                speed REAL NOT NULL DEFAULT 1.0,
-                pitch REAL NOT NULL DEFAULT 0.0,
-                intonation REAL NOT NULL DEFAULT 1.0,
-                volume REAL NOT NULL DEFAULT 1.0
+    if db_pool is not None:
+        return
+
+    async with db_init_lock:
+        if db_pool is not None:
+            return
+
+        for attempt in range(5):
+            try:
+                db_pool = await asyncpg.create_pool(DATABASE_URL)
+                break
+            except (OSError, asyncpg.PostgresError) as e:
+                if attempt < 4:
+                    logger.warning(f"DB接続失敗 ({attempt + 1}/5): {e}、2秒後にリトライ")
+                    await asyncio.sleep(2)
+                else:
+                    raise
+
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    guild_id BIGINT NOT NULL DEFAULT 0,
+                    user_id BIGINT NOT NULL,
+                    speaker_id INTEGER NOT NULL DEFAULT 3,
+                    speed REAL NOT NULL DEFAULT 1.0,
+                    pitch REAL NOT NULL DEFAULT 0.0,
+                    intonation REAL NOT NULL DEFAULT 1.0,
+                    volume REAL NOT NULL DEFAULT 1.0,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
+            await conn.execute(
+                "ALTER TABLE user_settings "
+                "ADD COLUMN IF NOT EXISTS guild_id BIGINT NOT NULL DEFAULT 0"
             )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS guild_dicts (
-                guild_id BIGINT NOT NULL,
-                word TEXT NOT NULL,
-                reading TEXT NOT NULL,
-                PRIMARY KEY (guild_id, word)
+
+            pk_cols = await conn.fetch(
+                """
+                SELECT kcu.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name
+                 AND tc.table_schema = kcu.table_schema
+                WHERE tc.table_name = 'user_settings'
+                  AND tc.constraint_type = 'PRIMARY KEY'
+                ORDER BY kcu.ordinal_position
+                """
             )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS guild_mutes (
-                guild_id BIGINT NOT NULL,
-                user_id BIGINT NOT NULL,
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
-    logger.info("DB初期化完了")
+            current_pk = [row["column_name"] for row in pk_cols]
+            if current_pk != ["guild_id", "user_id"]:
+                pk_name = await conn.fetchval(
+                    """
+                    SELECT tc.constraint_name
+                    FROM information_schema.table_constraints tc
+                    WHERE tc.table_name = 'user_settings'
+                      AND tc.constraint_type = 'PRIMARY KEY'
+                    """
+                )
+                if pk_name:
+                    await conn.execute(
+                        f'ALTER TABLE user_settings DROP CONSTRAINT "{pk_name}"'
+                    )
+                await conn.execute(
+                    "ALTER TABLE user_settings "
+                    "ADD PRIMARY KEY (guild_id, user_id)"
+                )
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS guild_dicts (
+                    guild_id BIGINT NOT NULL,
+                    word TEXT NOT NULL,
+                    reading TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, word)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS guild_mutes (
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
+        logger.info("DB初期化完了")
 
 
 async def load_user_settings():
     """DBからユーザー設定をメモリにロード"""
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT user_id, speaker_id, speed, pitch, intonation, volume "
+            "SELECT guild_id, user_id, speaker_id, speed, pitch, intonation, volume "
             "FROM user_settings"
         )
     user_settings.clear()
     for row in rows:
-        user_settings[row["user_id"]] = VoiceSettings(
+        user_settings[(row["guild_id"], row["user_id"])] = VoiceSettings(
             speaker_id=row["speaker_id"],
             speed=row["speed"],
             pitch=row["pitch"],
@@ -148,17 +195,18 @@ async def load_user_settings():
     logger.info(f"ユーザー設定を読み込みました: {len(user_settings)}件")
 
 
-async def save_user_setting(user_id: int, settings: VoiceSettings):
+async def save_user_setting(guild_id: int, user_id: int, settings: VoiceSettings):
     """ユーザー設定を1件DBに保存"""
     async with db_pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO user_settings
-                (user_id, speaker_id, speed, pitch, intonation, volume)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (user_id) DO UPDATE SET
-                speaker_id = $2, speed = $3, pitch = $4, intonation = $5, volume = $6
+                (guild_id, user_id, speaker_id, speed, pitch, intonation, volume)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (guild_id, user_id) DO UPDATE SET
+                speaker_id = $3, speed = $4, pitch = $5, intonation = $6, volume = $7
             """,
+            guild_id,
             user_id,
             settings.speaker_id,
             settings.speed,
@@ -315,13 +363,20 @@ async def fetch_speakers():
     logger.info(f"スピーカー一覧合計: {len(speakers_cache)}件")
 
 
-def get_user_settings(user_id: int) -> VoiceSettings:
+def get_user_settings(guild_id: int, user_id: int) -> VoiceSettings:
     """ユーザーの音声設定を返す"""
-    return user_settings.get(user_id, VoiceSettings())
+    settings = user_settings.get((guild_id, user_id))
+    if settings is not None:
+        return settings
+    # 旧スキーマから移行した guild_id=0 の設定を後方互換として参照
+    return user_settings.get((0, user_id), VoiceSettings())
 
 
 async def synthesize(text: str, settings: VoiceSettings) -> bytes:
     """エンジンでテキストを音声合成してwavバイトを返す"""
+    if not ENGINES:
+        raise RuntimeError("TTSエンジンが設定されていません")
+
     engine_url, real_id = speaker_engine.get(
         settings.speaker_id, (ENGINES[0][1], settings.speaker_id)
     )
@@ -523,7 +578,7 @@ async def join(interaction: discord.Interaction):
 
     # 接続時に音声で挨拶
     try:
-        settings = get_user_settings(interaction.user.id)
+        settings = get_user_settings(interaction.guild.id, interaction.user.id)
         audio_data = await synthesize("せつぞくしました", settings)
         vc = interaction.guild.voice_client
         if vc and vc.is_connected():
@@ -541,6 +596,19 @@ async def on_voice_state_update(
     after: discord.VoiceState,
 ):
     if member.bot:
+        # Bot自身の再接続時、キューが残っていれば再生を再開する
+        if client.user and member.id == client.user.id and after.channel is not None:
+            guild_id = member.guild.id
+            vc = member.guild.voice_client
+            queue = queues.get(guild_id)
+            if (
+                vc
+                and vc.is_connected()
+                and queue
+                and not vc.is_playing()
+                and not vc.is_paused()
+            ):
+                await play_next(guild_id, vc)
         return
 
     vc = member.guild.voice_client
@@ -575,7 +643,7 @@ async def on_voice_state_update(
             if not vc or not vc.is_connected():
                 return
 
-            settings = get_user_settings(member.id)
+            settings = get_user_settings(member.guild.id, member.id)
             audio_data = await synthesize(text, settings)
 
             vc = member.guild.voice_client
@@ -715,7 +783,7 @@ async def speaker(
         return
 
     speaker_id = matched_style[0]
-    settings = get_user_settings(interaction.user.id)
+    settings = get_user_settings(interaction.guild.id, interaction.user.id)
     settings = VoiceSettings(
         speaker_id=speaker_id,
         speed=settings.speed,
@@ -723,8 +791,8 @@ async def speaker(
         intonation=settings.intonation,
         volume=settings.volume,
     )
-    user_settings[interaction.user.id] = settings
-    await save_user_setting(interaction.user.id, settings)
+    user_settings[(interaction.guild.id, interaction.user.id)] = settings
+    await save_user_setting(interaction.guild.id, interaction.user.id, settings)
     name = speakers_cache.get(speaker_id, f"ID: {speaker_id}")
     await interaction.response.send_message(f"キャラクターを「{name}」に変更しました")
 
@@ -793,7 +861,7 @@ async def voice(
     intonation: float | None = None,
     volume: float | None = None,
 ):
-    settings = get_user_settings(interaction.user.id)
+    settings = get_user_settings(interaction.guild.id, interaction.user.id)
 
     # 指定されたパラメータのみ更新
     new_speed = settings.speed if speed is None else max(0.5, min(2.0, speed))
@@ -825,8 +893,8 @@ async def voice(
         intonation=new_intonation,
         volume=new_volume,
     )
-    user_settings[interaction.user.id] = new_settings
-    await save_user_setting(interaction.user.id, new_settings)
+    user_settings[(interaction.guild.id, interaction.user.id)] = new_settings
+    await save_user_setting(interaction.guild.id, interaction.user.id, new_settings)
 
     changed = []
     if speed is not None:
@@ -881,7 +949,7 @@ async def on_message(message: discord.Message):
         text = text[:MAX_READ_LENGTH] + "、いかしょうりゃく"
 
     try:
-        settings = get_user_settings(message.author.id)
+        settings = get_user_settings(message.guild.id, message.author.id)
         audio_data = await synthesize(text, settings)
     except aiohttp.ClientError:
         logger.warning("音声合成エンジンに接続できません（再起動中の可能性）")
@@ -906,6 +974,8 @@ async def on_message(message: discord.Message):
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN environment variable is required")
+    if not ENGINES:
+        raise RuntimeError("VOICEVOX_URL など、少なくとも1つのTTSエンジンURLが必要です")
 
     while True:
         try:

@@ -78,8 +78,16 @@ class TestVoiceSettings:
     def test_get_user_settings_returns_default(self):
         from bot import VoiceSettings, get_user_settings
 
-        s = get_user_settings(123456)
+        s = get_user_settings(111, 123456)
         assert s.speaker_id == VoiceSettings().speaker_id
+
+    def test_get_user_settings_falls_back_to_legacy_scope(self):
+        from bot import VoiceSettings, get_user_settings, user_settings
+
+        user_settings[(0, 555)] = VoiceSettings(speed=1.7)
+        s = get_user_settings(999, 555)
+        assert s.speed == 1.7
+        user_settings.pop((0, 555), None)
 
 
 class TestPlayNext:
@@ -235,6 +243,13 @@ class TestEngines:
 
         offsets = [offset for _, _, offset in ENGINES]
         assert len(offsets) == len(set(offsets))
+
+    async def test_synthesize_raises_when_no_engines(self, monkeypatch):
+        from bot import VoiceSettings, synthesize
+
+        monkeypatch.setattr("bot.ENGINES", [])
+        with pytest.raises(RuntimeError):
+            await synthesize("テスト", VoiceSettings())
 
 
 class TestReadChannels:
