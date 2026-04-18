@@ -187,6 +187,9 @@ _synth_cache: OrderedDict[tuple, bytes] = OrderedDict()
 _SYNTH_CACHE_MAX = 64
 # 同じキーで同時に合成が走らないよう in-flight 管理
 _synth_in_flight: dict[tuple, asyncio.Event] = {}
+# 失敗した合成候補の短期バックオフ（engine_url, real_id）-> monotonic deadline
+_candidate_fail_until: dict[tuple[str, int], float] = {}
+CANDIDATE_FAIL_BACKOFF_SECONDS = 10.0
 # speaker_engine 空時の再取得を間引く
 _speaker_refresh_lock = asyncio.Lock()
 _last_speaker_refresh_attempt = 0.0
@@ -715,6 +718,22 @@ async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) ->
             _synth_cache.move_to_end(cache_key)
             return cached
 
+        # 主候補がミスでも、同一パラメータで過去にフォールバック成功済みなら再利用
+        for engine_url, real_id, _ in candidates[1:]:
+            alt_key = (
+                engine_url,
+                real_id,
+                text,
+                settings.speed,
+                settings.pitch,
+                settings.intonation,
+                settings.volume,
+            )
+            alt_cached = _synth_cache.get(alt_key)
+            if alt_cached is not None:
+                _synth_cache.move_to_end(alt_key)
+                return alt_cached
+
         in_flight = _synth_in_flight.get(cache_key)
         if in_flight is not None:
             await in_flight.wait()
@@ -729,7 +748,14 @@ async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) ->
 
     try:
         last_error: Exception | None = None
+        attempted = False
+        now = time.monotonic()
         for idx, (engine_url, real_id, reason) in enumerate(candidates):
+            candidate_key = (engine_url, real_id)
+            fail_until = _candidate_fail_until.get(candidate_key, 0.0)
+            if fail_until > now:
+                continue
+            attempted = True
             try:
                 data = await _synthesize_with_candidate(
                     engine_url,
@@ -737,6 +763,7 @@ async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) ->
                     text,
                     settings,
                 )
+                _candidate_fail_until.pop(candidate_key, None)
                 if idx > 0:
                     logger.warning(
                         f"音声合成フォールバック成功: reason={reason}, "
@@ -766,6 +793,46 @@ async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) ->
                 return data
             except (aiohttp.ClientError, TimeoutError) as e:
                 last_error = e
+                _candidate_fail_until[candidate_key] = (
+                    time.monotonic() + CANDIDATE_FAIL_BACKOFF_SECONDS
+                )
+                logger.warning(
+                    f"音声合成候補失敗: reason={reason}, engine={engine_url}, "
+                    f"speaker={real_id}, error={e}"
+                )
+
+        # すべてバックオフ中で未試行なら、先頭候補を1回だけプローブする
+        if not attempted and candidates:
+            engine_url, real_id, reason = candidates[0]
+            candidate_key = (engine_url, real_id)
+            try:
+                data = await _synthesize_with_candidate(
+                    engine_url,
+                    real_id,
+                    text,
+                    settings,
+                )
+                _candidate_fail_until.pop(candidate_key, None)
+                if cache_key is not None:
+                    key = (
+                        engine_url,
+                        real_id,
+                        text,
+                        settings.speed,
+                        settings.pitch,
+                        settings.intonation,
+                        settings.volume,
+                    )
+                    _synth_cache[key] = data
+                    _synth_cache.move_to_end(key)
+                    while len(_synth_cache) > _SYNTH_CACHE_MAX:
+                        _synth_cache.popitem(last=False)
+                return data
+            except (aiohttp.ClientError, TimeoutError) as e:
+                last_error = e
+                _candidate_fail_until[candidate_key] = (
+                    time.monotonic() + CANDIDATE_FAIL_BACKOFF_SECONDS
+                )
                 logger.warning(
                     f"音声合成候補失敗: reason={reason}, engine={engine_url}, "
                     f"speaker={real_id}, error={e}"

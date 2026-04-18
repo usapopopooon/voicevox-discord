@@ -2495,6 +2495,69 @@ class TestSynthesizeCache:
             bot._synth_cache.clear()
             bot._synth_in_flight.clear()
 
+    async def test_cache_uses_fallback_entry_without_http(self):
+        import bot
+        from bot import VoiceSettings, synthesize
+
+        original_map = dict(bot.speaker_engine)
+        try:
+            bot._synth_cache.clear()
+            bot.speaker_engine.clear()
+            # requested -> primary, default -> fallback
+            bot.speaker_engine[999] = ("http://primary:50021", 99)
+            bot.speaker_engine[3] = ("http://fallback:50021", 3)
+            fallback_key = (
+                "http://fallback:50021",
+                3,
+                "定型文",
+                1.0,
+                0.0,
+                1.0,
+                1.0,
+            )
+            bot._synth_cache[fallback_key] = b"from-fallback-cache"
+
+            # HTTPモックを登録しない（キャッシュヒットならネットワーク不要）
+            result = await synthesize(
+                "定型文", VoiceSettings(speaker_id=999), cache=True
+            )
+            assert result == b"from-fallback-cache"
+        finally:
+            bot.speaker_engine.clear()
+            bot.speaker_engine.update(original_map)
+            bot._synth_cache.clear()
+
+    async def test_candidate_backoff_skips_recent_failure(self):
+        import bot
+        from bot import VoiceSettings, synthesize
+
+        original_map = dict(bot.speaker_engine)
+        original_fail = dict(bot._candidate_fail_until)
+        try:
+            bot.speaker_engine.clear()
+            bot._candidate_fail_until.clear()
+            bot.speaker_engine[777] = ("http://bad:50021", 7)
+            bot.speaker_engine[3] = ("http://good:50021", 3)
+            bot._candidate_fail_until[("http://bad:50021", 7)] = (
+                bot.time.monotonic() + 60.0
+            )
+
+            with aioresponses() as m:
+                m.post(re.compile(r"http://good:50021/audio_query.*"), payload={})
+                m.post(re.compile(r"http://good:50021/synthesis.*"), body=b"ok")
+                result = await synthesize("テスト", VoiceSettings(speaker_id=777))
+                assert result == b"ok"
+
+                bad_calls = [
+                    k for k in m.requests.keys() if "http://bad:50021" in str(k)
+                ]
+                assert bad_calls == []
+        finally:
+            bot.speaker_engine.clear()
+            bot.speaker_engine.update(original_map)
+            bot._candidate_fail_until.clear()
+            bot._candidate_fail_until.update(original_fail)
+
     async def test_fallback_caches_under_primary_key_too(self, monkeypatch):
         """primary 候補が失敗して fallback で成功した時、
         primary キーでも引けるように二重キャッシュされること"""
