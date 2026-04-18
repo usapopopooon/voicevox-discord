@@ -196,6 +196,44 @@ class TestCleanText:
 
         assert clean_text("https://example.com") == "URLしょうりゃく"
 
+    def test_replaces_kaomoji_with_annotation(self):
+        """kaomoji.json に登録された顔文字が annotation に置換される"""
+        import bot
+        from bot import clean_text
+
+        # 辞書からランダム選出ではなく、確実に存在するはずの代表的な顔文字を使う
+        # 読み込めなかった場合はスキップ
+        if not bot._KAOMOJI_DICT:
+            pytest.skip("kaomoji dict not loaded")
+
+        # 辞書内のエントリを 1 つ取り出してテスト（内容に依存しない形）
+        face = next(iter(bot._KAOMOJI_DICT))
+        annotation = bot._KAOMOJI_DICT[face]
+        result = clean_text(f"よ{face}ね")
+        assert annotation in result
+        assert face not in result
+
+    def test_kaomoji_longest_match_wins(self):
+        """長い顔文字を短いものより優先してマッチさせる"""
+        import bot
+        from bot import clean_text
+
+        original_dict = bot._KAOMOJI_DICT
+        original_pattern = bot._KAOMOJI_PATTERN
+        # ダミー辞書で挙動を検証
+        bot._KAOMOJI_DICT = {"(ω)": "みじかい", "(ω´)": "ながい"}
+        bot._KAOMOJI_PATTERN = re.compile(
+            "|".join(
+                re.escape(k) for k in sorted(bot._KAOMOJI_DICT, key=len, reverse=True)
+            )
+        )
+        try:
+            assert clean_text("あ(ω´)い") == "あながいい"
+            assert clean_text("あ(ω)い") == "あみじかいい"
+        finally:
+            bot._KAOMOJI_DICT = original_dict
+            bot._KAOMOJI_PATTERN = original_pattern
+
 
 class TestMute:
     def test_is_muted(self):

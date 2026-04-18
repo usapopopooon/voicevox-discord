@@ -217,6 +217,129 @@ def _clean_text_replace(m: re.Match[str]) -> str:
     return m.group("emoji")  # カスタム絵文字は名前だけ残す
 
 
+# kaomoji.json に含まれない素朴な基本形を補完する curated dict。
+# Wikipedia の顔文字ページや一般的な日本語利用で頻出するものを中心に選定。
+_BASIC_KAOMOJI: dict[str, str] = {
+    # 笑顔・喜び
+    "(^_^)": "にっこり",
+    "(^-^)": "にっこり",
+    "(^o^)": "わーい",
+    "(^○^)": "にっこり",
+    "(^∇^)": "にっこり",
+    "(^∀^)": "にっこり",
+    "(^ω^)": "にっこり",
+    "(*^_^*)": "にこにこ",
+    "(*^-^*)": "にこにこ",
+    "(*^o^*)": "わーい",
+    "(#^^#)": "にこにこ",
+    "(*´ω`*)": "にこにこ",
+    "(*´∀`*)": "にこにこ",
+    "(´∀`)": "にっこり",
+    # 困惑・汗
+    "(^_^;)": "あせ",
+    "(^^;)": "あせ",
+    "(´∀`;)": "あせ",
+    "(;・∀・)": "あせあせ",
+    "(;´Д`)": "あせあせ",
+    # 悲しい・泣く
+    "(;_;)": "なく",
+    "(T_T)": "なく",
+    "(T-T)": "なく",
+    "(ToT)": "なく",
+    "(ToT)/~~~": "なく",
+    "(´;ω;`)": "なく",
+    "( ;∀;)": "なく",
+    "(´Д⊂ヽ": "なく",
+    "(>_<)": "つらい",
+    # 驚き
+    "Σ(ﾟдﾟ)": "びっくり",
+    "(ﾟДﾟ)": "びっくり",
+    "(ﾟдﾟ)": "びっくり",
+    "Σ(°Д°;)": "びっくり",
+    "Σ(´∀`;)": "びっくり",
+    "(@_@)": "くらくら",
+    "(*_*)": "くらくら",
+    # 怒り
+    "(#゚Д゚)": "おこる",
+    "(-_-#)": "おこる",
+    "(ಠ_ಠ)": "じとー",
+    # お辞儀・謝る
+    "m(_ _)m": "ぺこり",
+    "m(__)m": "ぺこり",
+    "m(。_。)m": "ぺこり",
+    # 眠い・ぼー
+    "(ー_ー)": "じとー",
+    "(-_-)": "うーん",
+    "( ˘ω˘)": "ねむい",
+    "(_ _)": "ねむい",
+    "zzz": "ねむい",
+    # 落ち込む・困る
+    "(´・ω・`)": "うーん",
+    "( ´・ω・`)": "うーん",
+    "(´・ω・)": "うーん",
+    "(・ω・)": "うーん",
+    "(´_ゝ`)": "ふーん",
+    "(´Д`)": "はぁ",
+    "orz": "がっくり",
+    "OTZ": "がっくり",
+    "OTL": "がっくり",
+    # 笑い（ネットスラング）
+    "www": "わらい",
+    "(笑)": "わらい",
+    "(爆)": "ばくわら",
+    "(苦笑)": "くわら",
+    # 挨拶・手振り
+    "(^_^)/": "ばいばい",
+    "ノシ": "ばいばい",
+    "ノ": "はーい",
+    "(´◡`)": "にっこり",
+}
+
+
+# 顔文字辞書（kao-utf8.json から読み込み、annotation を読み仮名として使う）。
+# 長い顔文字を優先マッチさせるため、キーは文字数降順でソートして正規表現化する。
+def _load_kaomoji_dict() -> dict[str, str]:
+    """bot/kaomoji.json + 基本形 curated dict を合成した face→annotation を返す"""
+    import json
+    from pathlib import Path
+
+    result: dict[str, str] = {}
+    path = Path(__file__).parent / "kaomoji.json"
+    try:
+        with path.open(encoding="utf-8") as f:
+            entries = json.load(f)
+        for entry in entries:
+            face = entry.get("face")
+            annotation = entry.get("annotation")
+            if isinstance(face, str) and isinstance(annotation, str) and face:
+                result.setdefault(face, annotation)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"顔文字辞書の読み込みに失敗: {e}")
+
+    # curated な基本形を優先（上書き可能）。辞書ファイル側の long-form と
+    # 重複しにくいシンプル形を中心に登録している。
+    for face, annotation in _BASIC_KAOMOJI.items():
+        result[face] = annotation
+    return result
+
+
+_KAOMOJI_DICT: dict[str, str] = _load_kaomoji_dict()
+if _KAOMOJI_DICT:
+    _KAOMOJI_PATTERN: re.Pattern[str] | None = re.compile(
+        "|".join(re.escape(k) for k in sorted(_KAOMOJI_DICT, key=len, reverse=True))
+    )
+    logger.info(f"顔文字辞書を読み込みました: {len(_KAOMOJI_DICT)}件")
+else:
+    _KAOMOJI_PATTERN = None
+
+
+def _replace_kaomoji(text: str) -> str:
+    """顔文字を annotation（読み仮名）に置換する。辞書が無ければそのまま返す。"""
+    if _KAOMOJI_PATTERN is None:
+        return text
+    return _KAOMOJI_PATTERN.sub(lambda m: _KAOMOJI_DICT[m.group(0)], text)
+
+
 # DB接続プール
 db_pool: asyncpg.Pool | None = None
 db_init_lock = asyncio.Lock()
@@ -540,7 +663,9 @@ def is_muted(guild_id: int, user_id: int) -> bool:
 
 
 def clean_text(text: str) -> str:
-    """読み上げ用にテキストを前処理する（1パスで URL/メール/カスタム絵文字を置換）"""
+    """読み上げ用にテキストを前処理する。
+    顔文字（長一致優先）→ URL/メール/カスタム絵文字 の順で置換する。"""
+    text = _replace_kaomoji(text)
     return _CLEAN_TEXT_PATTERN.sub(_clean_text_replace, text).strip()
 
 
