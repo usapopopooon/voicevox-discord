@@ -538,6 +538,120 @@ async def _refresh_speakers_if_needed() -> None:
         await fetch_speakers()
 
 
+def _append_synthesis_candidate(
+    candidates: list[tuple[str, int, str]],
+    seen: set[tuple[str, int]],
+    engine_url: str,
+    real_id: int,
+    reason: str,
+) -> None:
+    key = (engine_url, real_id)
+    if key in seen:
+        return
+    seen.add(key)
+    candidates.append((engine_url, real_id, reason))
+
+
+async def _build_synthesis_candidates(
+    requested_speaker_id: int,
+) -> list[tuple[str, int, str]]:
+    """音声合成の候補エンジンを優先順で構築する。"""
+    candidates: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int]] = set()
+
+    info = speaker_engine.get(requested_speaker_id)
+    if info is not None:
+        engine_url, real_id = info
+        _append_synthesis_candidate(
+            candidates,
+            seen,
+            engine_url,
+            real_id,
+            "requested_speaker",
+        )
+
+    if not speaker_engine:
+        await _refresh_speakers_if_needed()
+        info = speaker_engine.get(requested_speaker_id)
+        if info is not None:
+            engine_url, real_id = info
+            _append_synthesis_candidate(
+                candidates,
+                seen,
+                engine_url,
+                real_id,
+                "requested_after_refresh",
+            )
+
+    default_info = speaker_engine.get(DEFAULT_SPEAKER)
+    if default_info is not None:
+        engine_url, real_id = default_info
+        _append_synthesis_candidate(
+            candidates,
+            seen,
+            engine_url,
+            real_id,
+            "default_speaker_mapping",
+        )
+
+    if speaker_engine:
+        # マッピングに存在する候補を追加（先頭3件まで）
+        for global_id in sorted(speaker_engine.keys())[:3]:
+            engine_url, real_id = speaker_engine[global_id]
+            _append_synthesis_candidate(
+                candidates,
+                seen,
+                engine_url,
+                real_id,
+                "cached_speaker_fallback",
+            )
+
+    # 最終手段: 各エンジンへ DEFAULT_SPEAKER を直接投げる
+    for _, engine_url, _ in ENGINES:
+        _append_synthesis_candidate(
+            candidates,
+            seen,
+            engine_url,
+            DEFAULT_SPEAKER,
+            "raw_default_id",
+        )
+
+    return candidates
+
+
+async def _synthesize_with_candidate(
+    engine_url: str,
+    real_id: int,
+    text: str,
+    settings: VoiceSettings,
+) -> bytes:
+    """指定候補で音声合成を1回実行する。"""
+    session = await get_http_session()
+    params = {"text": text, "speaker": real_id}
+    async with session.post(f"{engine_url}/audio_query", params=params) as resp:
+        resp.raise_for_status()
+        query = await resp.json()
+
+    # ユーザーの音声パラメータを適用
+    query["speedScale"] = settings.speed
+    query["pitchScale"] = settings.pitch
+    query["intonationScale"] = settings.intonation
+    query["volumeScale"] = settings.volume
+    # Discord 互換フォーマットを直接要求 → ffmpeg 経由の変換を省略可能にする
+    # 未対応エンジンは無視するのでデフォルトフォーマットで返る（FFmpeg で再生）
+    query["outputSamplingRate"] = _DISCORD_SAMPLE_RATE
+    query["outputStereo"] = True
+
+    async with session.post(
+        f"{engine_url}/synthesis",
+        params={"speaker": real_id},
+        json=query,
+        headers={"Content-Type": "application/json"},
+    ) as resp:
+        resp.raise_for_status()
+        return await resp.read()
+
+
 def get_user_settings(guild_id: int, user_id: int) -> VoiceSettings:
     """ユーザーの音声設定を返す"""
     settings = user_settings.get((guild_id, user_id))
@@ -556,34 +670,18 @@ async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) ->
     if not ENGINES:
         raise RuntimeError("TTSエンジンが設定されていません")
 
-    # speaker_id はオフセット加算後の global_id。
-    # キャッシュに無い場合、DEFAULT_SPEAKER の登録マッピングへフォールバックする。
-    # DEFAULT_SPEAKER も未登録なら fetch_speakers が未成功 → 不正な ID を投げると
-    # 別音声になりかねないため明示的に失敗させる。
-    engine_info = speaker_engine.get(settings.speaker_id)
-    if engine_info is None:
-        if not speaker_engine:
-            await _refresh_speakers_if_needed()
-            engine_info = speaker_engine.get(settings.speaker_id)
+    candidates = await _build_synthesis_candidates(settings.speaker_id)
+    if not candidates:
+        raise RuntimeError("音声合成候補がありません。エンジン設定を確認してください")
 
-        if engine_info is None:
-            engine_info = speaker_engine.get(DEFAULT_SPEAKER)
-        if engine_info is None:
-            raise RuntimeError(
-                "スピーカー情報が未取得です。エンジン接続を確認してください"
-            )
-        logger.warning(
-            f"speaker_id {settings.speaker_id} がキャッシュに無いため "
-            f"DEFAULT_SPEAKER({DEFAULT_SPEAKER}) を使用"
-        )
-    engine_url, real_id = engine_info
+    primary_engine_url, primary_real_id, _ = candidates[0]
 
     cache_key = None
     in_flight_event: asyncio.Event | None = None
     if cache:
         cache_key = (
-            engine_url,
-            real_id,
+            primary_engine_url,
+            primary_real_id,
             text,
             settings.speed,
             settings.pitch,
@@ -609,37 +707,47 @@ async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) ->
         _synth_in_flight[cache_key] = in_flight_event
 
     try:
-        session = await get_http_session()
-        params = {"text": text, "speaker": real_id}
-        async with session.post(f"{engine_url}/audio_query", params=params) as resp:
-            resp.raise_for_status()
-            query = await resp.json()
+        last_error: Exception | None = None
+        for idx, (engine_url, real_id, reason) in enumerate(candidates):
+            try:
+                data = await _synthesize_with_candidate(
+                    engine_url,
+                    real_id,
+                    text,
+                    settings,
+                )
+                if idx > 0:
+                    logger.warning(
+                        f"音声合成フォールバック成功: reason={reason}, "
+                        f"engine={engine_url}, speaker={real_id}"
+                    )
 
-        # ユーザーの音声パラメータを適用
-        query["speedScale"] = settings.speed
-        query["pitchScale"] = settings.pitch
-        query["intonationScale"] = settings.intonation
-        query["volumeScale"] = settings.volume
-        # Discord 互換フォーマットを直接要求 → ffmpeg 経由の変換を省略可能にする
-        # 未対応エンジンは無視するのでデフォルトフォーマットで返る（FFmpeg で再生）
-        query["outputSamplingRate"] = _DISCORD_SAMPLE_RATE
-        query["outputStereo"] = True
+                if cache_key is not None:
+                    key = (
+                        engine_url,
+                        real_id,
+                        text,
+                        settings.speed,
+                        settings.pitch,
+                        settings.intonation,
+                        settings.volume,
+                    )
+                    _synth_cache[key] = data
+                    _synth_cache.move_to_end(key)
+                    while len(_synth_cache) > _SYNTH_CACHE_MAX:
+                        _synth_cache.popitem(last=False)
 
-        async with session.post(
-            f"{engine_url}/synthesis",
-            params={"speaker": real_id},
-            json=query,
-            headers={"Content-Type": "application/json"},
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.read()
+                return data
+            except (aiohttp.ClientError, TimeoutError) as e:
+                last_error = e
+                logger.warning(
+                    f"音声合成候補失敗: reason={reason}, engine={engine_url}, "
+                    f"speaker={real_id}, error={e}"
+                )
 
-        if cache_key is not None:
-            _synth_cache[cache_key] = data
-            while len(_synth_cache) > _SYNTH_CACHE_MAX:
-                _synth_cache.popitem(last=False)
-
-        return data
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("音声合成に失敗しました（全フォールバック候補失敗）")
     finally:
         if cache_key is not None and in_flight_event is not None:
             _synth_in_flight.pop(cache_key, None)

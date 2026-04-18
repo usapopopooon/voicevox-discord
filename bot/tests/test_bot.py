@@ -2,6 +2,7 @@ import re
 from collections import deque
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 from aioresponses import aioresponses
 
@@ -545,13 +546,21 @@ class TestSynthesizeFallback:
             bot.speaker_engine.pop(3, None)
 
     async def test_raises_when_speaker_engine_empty(self):
-        """speaker_engine が完全に空（fetch_speakers 失敗等）の場合は明示的にエラー"""
+        """全候補が失敗した場合は ClientError 系を返す。"""
         import bot
         from bot import VoiceSettings, synthesize
 
+        original_last_attempt = bot._last_speaker_refresh_attempt
+        bot._last_speaker_refresh_attempt = 0.0
         bot.speaker_engine.clear()
-        with pytest.raises(RuntimeError, match="スピーカー情報"):
-            await synthesize("テスト", VoiceSettings(speaker_id=99999))
+        try:
+            with patch("bot.fetch_speakers", new=AsyncMock(return_value=None)):
+                with aioresponses() as m:
+                    m.post(re.compile(r".*audio_query.*"), status=500)
+                    with pytest.raises(aiohttp.ClientError):
+                        await synthesize("テスト", VoiceSettings(speaker_id=99999))
+        finally:
+            bot._last_speaker_refresh_attempt = original_last_attempt
 
     async def test_uses_mapped_real_id(self):
         import bot
@@ -594,6 +603,26 @@ class TestSynthesizeFallback:
         finally:
             bot.speaker_engine.pop(3, None)
             bot._last_speaker_refresh_attempt = original_last_attempt
+
+    async def test_fallbacks_to_next_candidate_when_primary_engine_fails(self):
+        import bot
+        from bot import VoiceSettings, synthesize
+
+        bot.speaker_engine[99999] = ("http://engine-a:50021", 10)
+        bot.speaker_engine[3] = ("http://engine-b:50021", 3)
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r"http://engine-a:50021/audio_query.*"), status=500)
+                m.post(re.compile(r"http://engine-b:50021/audio_query.*"), payload={})
+                m.post(
+                    re.compile(r"http://engine-b:50021/synthesis.*"),
+                    body=b"fallback-ok",
+                )
+                result = await synthesize("テスト", VoiceSettings(speaker_id=99999))
+                assert result == b"fallback-ok"
+        finally:
+            bot.speaker_engine.pop(99999, None)
+            bot.speaker_engine.pop(3, None)
 
 
 class TestDbOperations:
