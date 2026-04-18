@@ -3,6 +3,7 @@ import io
 import logging
 import os
 import re
+import subprocess
 import time
 import wave
 from collections import OrderedDict, deque
@@ -224,6 +225,11 @@ _dict_patterns: dict[int, re.Pattern[str]] = {}
 # 繰り返し呼ばれる定型文は十分にヒットする。
 _synth_cache: OrderedDict[tuple, bytes] = OrderedDict()
 _SYNTH_CACHE_MAX = 32
+# 短時間の重複合成を抑える TTL キャッシュ（cache=False でも利用）
+# 1件あたり最大 ~500KB。max=16 で ~8MB 上限。
+_recent_synth_cache: OrderedDict[tuple, tuple[float, bytes]] = OrderedDict()
+_RECENT_SYNTH_CACHE_MAX = 16
+_RECENT_SYNTH_TTL_SECONDS = 20.0
 # 同じキーで同時に合成が走らないよう in-flight 管理
 _synth_in_flight: dict[tuple, asyncio.Event] = {}
 # 失敗した合成候補の短期バックオフ（engine_url, real_id）-> monotonic deadline
@@ -542,7 +548,12 @@ def _make_audio_source(audio_data: bytes) -> discord.AudioSource:
     except (wave.Error, EOFError, ValueError) as e:
         logger.debug(f"PCM直接再生不可、FFmpegにフォールバック: {e}")
 
-    return discord.FFmpegPCMAudio(io.BytesIO(audio_data), pipe=True)
+    return discord.FFmpegPCMAudio(
+        io.BytesIO(audio_data),
+        pipe=True,
+        before_options="-loglevel error",
+        stderr=subprocess.DEVNULL,
+    )
 
 
 # --- TTS エンジン ---
@@ -646,6 +657,25 @@ def _lookup_synth_cache(
     return None
 
 
+def _lookup_recent_synth_cache(
+    candidates: list[_SynthCandidate], text: str, settings: VoiceSettings
+) -> bytes | None:
+    """短時間キャッシュを参照して、期限内ヒットがあれば返す。"""
+    now = time.monotonic()
+    for cand in candidates:
+        key = _synth_cache_key(cand, text, settings)
+        entry = _recent_synth_cache.get(key)
+        if entry is None:
+            continue
+        expires_at, data = entry
+        if expires_at <= now:
+            _recent_synth_cache.pop(key, None)
+            continue
+        _recent_synth_cache.move_to_end(key)
+        return data
+    return None
+
+
 def _store_synth_cache(primary_key: tuple, actual_key: tuple, data: bytes) -> None:
     """合成結果をキャッシュ。primary と実候補が異なる場合は両方のキーで保存する"""
     _synth_cache[actual_key] = data
@@ -655,6 +685,14 @@ def _store_synth_cache(primary_key: tuple, actual_key: tuple, data: bytes) -> No
         _synth_cache.move_to_end(primary_key)
     while len(_synth_cache) > _SYNTH_CACHE_MAX:
         _synth_cache.popitem(last=False)
+
+
+def _store_recent_synth_cache(key: tuple, data: bytes) -> None:
+    """短時間キャッシュへ保存する（TTL + LRU）。"""
+    _recent_synth_cache[key] = (time.monotonic() + _RECENT_SYNTH_TTL_SECONDS, data)
+    _recent_synth_cache.move_to_end(key)
+    while len(_recent_synth_cache) > _RECENT_SYNTH_CACHE_MAX:
+        _recent_synth_cache.popitem(last=False)
 
 
 async def _build_synthesis_candidates(
@@ -759,8 +797,12 @@ async def _try_candidate(
         raise
 
     _candidate_fail_until.pop(pair, None)
+    actual_key = _synth_cache_key(cand, text, settings)
+    _store_recent_synth_cache(actual_key, data)
+    if primary_key is not None and actual_key != primary_key:
+        _store_recent_synth_cache(primary_key, data)
     if primary_key is not None:
-        _store_synth_cache(primary_key, _synth_cache_key(cand, text, settings), data)
+        _store_synth_cache(primary_key, actual_key, data)
     return data
 
 
@@ -819,10 +861,26 @@ async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) ->
     if not candidates:
         raise RuntimeError("音声合成候補がありません。エンジン設定を確認してください")
 
-    if not cache:
-        return await _run_candidates(candidates, text, settings, primary_key=None)
-
     primary_key = _synth_cache_key(candidates[0], text, settings)
+
+    if not cache:
+        recent = _lookup_recent_synth_cache(candidates, text, settings)
+        if recent is not None:
+            return recent
+
+        in_flight = _synth_in_flight.get(primary_key)
+        if in_flight is not None:
+            await in_flight.wait()
+            recent = _lookup_recent_synth_cache(candidates, text, settings)
+            if recent is not None:
+                return recent
+        in_flight_event = asyncio.Event()
+        _synth_in_flight[primary_key] = in_flight_event
+        try:
+            return await _run_candidates(candidates, text, settings, primary_key=None)
+        finally:
+            _synth_in_flight.pop(primary_key, None)
+            in_flight_event.set()
 
     # キャッシュ確認 → in-flight 待機 → 再度キャッシュ確認 の順で重複HTTPを防ぐ
     cached = _lookup_synth_cache(candidates, text, settings)

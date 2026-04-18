@@ -2379,28 +2379,31 @@ class TestDictPatternCache:
 
 
 class TestSynthesizeCache:
-    """合成結果の LRU キャッシュ（cache=True の時のみ有効）"""
+    """合成結果キャッシュの挙動（永続LRU + 短時間TTL）"""
 
-    async def test_default_no_cache(self):
-        """cache を渡さない場合はキャッシュしないこと（連投で2回HTTPが来る）"""
+    async def test_default_uses_recent_ttl_cache(self):
+        """cache=False でも短時間の同一合成はTTLキャッシュでHTTPを抑制する"""
         import bot
         from bot import VoiceSettings, close_http_session, synthesize
 
         bot._synth_cache.clear()
+        bot._recent_synth_cache.clear()
         try:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"one")
-                m.post(re.compile(r".*audio_query.*"), payload={})
-                m.post(re.compile(r".*synthesis.*"), body=b"two")
                 r1 = await synthesize("同じテキスト", VoiceSettings())
                 r2 = await synthesize("同じテキスト", VoiceSettings())
-                # それぞれのモックが使われて2回HTTPが発生したはず
                 assert r1 == b"one"
-                assert r2 == b"two"
+                assert r2 == b"one"
+                synthesis_count = sum(
+                    len(v) for k, v in m.requests.items() if "synthesis" in str(k)
+                )
+                assert synthesis_count == 1
         finally:
             await close_http_session()
             bot._synth_cache.clear()
+            bot._recent_synth_cache.clear()
 
     async def test_cache_hit_skips_http(self):
         """cache=True の2回目はHTTPを叩かない"""
@@ -2519,15 +2522,68 @@ class TestSynthesizeCache:
         from bot import VoiceSettings, close_http_session, synthesize
 
         bot._synth_cache.clear()
+        bot._recent_synth_cache.clear()
         try:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"x")
                 await synthesize("キャッシュしない", VoiceSettings())
             assert bot._synth_cache == {}
+            assert bot._recent_synth_cache != {}
         finally:
             await close_http_session()
             bot._synth_cache.clear()
+            bot._recent_synth_cache.clear()
+
+    async def test_recent_cache_expires(self):
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        original_ttl = bot._RECENT_SYNTH_TTL_SECONDS
+        bot._RECENT_SYNTH_TTL_SECONDS = 0.0
+        bot._recent_synth_cache.clear()
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={}, repeat=True)
+                m.post(re.compile(r".*synthesis.*"), body=b"z", repeat=True)
+                await synthesize("期限切れ", VoiceSettings())
+                await synthesize("期限切れ", VoiceSettings())
+                synthesis_count = sum(
+                    len(v) for k, v in m.requests.items() if "synthesis" in str(k)
+                )
+                assert synthesis_count == 2
+        finally:
+            bot._RECENT_SYNTH_TTL_SECONDS = original_ttl
+            await close_http_session()
+            bot._recent_synth_cache.clear()
+
+    async def test_concurrent_calls_dedupe_http_even_without_cache_true(self):
+        """同一キーの同時合成は cache=False でも in-flight 共有で1回にまとまる"""
+        import asyncio
+
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        bot._recent_synth_cache.clear()
+        bot._synth_in_flight.clear()
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={}, repeat=True)
+                m.post(re.compile(r".*synthesis.*"), body=b"once", repeat=True)
+                r1, r2 = await asyncio.gather(
+                    synthesize("並行-nocache", VoiceSettings()),
+                    synthesize("並行-nocache", VoiceSettings()),
+                )
+                assert r1 == b"once"
+                assert r2 == b"once"
+                synthesis_count = sum(
+                    len(v) for k, v in m.requests.items() if "synthesis" in str(k)
+                )
+                assert synthesis_count == 1
+        finally:
+            await close_http_session()
+            bot._recent_synth_cache.clear()
+            bot._synth_in_flight.clear()
 
     async def test_concurrent_calls_dedupe_http(self):
         """同一キーで同時に cache=True の合成が走ると、HTTPは1回だけになる"""

@@ -30,3 +30,13 @@ def clear_candidate_backoff(env_setup):
     bot._candidate_fail_until.clear()
     yield
     bot._candidate_fail_until.clear()
+
+
+@pytest.fixture(autouse=True)
+def clear_recent_synth_cache(env_setup):
+    """短時間合成キャッシュはテスト間で独立させる。"""
+    import bot
+
+    bot._recent_synth_cache.clear()
+    yield
+    bot._recent_synth_cache.clear()
