@@ -1410,6 +1410,40 @@ class TestOnMessageMore:
 
         assert len(captured_text[0]) == MAX_READ_LENGTH + len("、いかしょうりゃく")
 
+    async def test_preserves_order_under_concurrent_synth(self):
+        """2メッセージ同時到着時、後続が先に合成完了しても queue 順序が維持される"""
+        import asyncio
+
+        from bot import on_message, play_locks, queues, read_channels
+
+        read_channels[10008] = 888
+
+        async def fake_synthesize(text, settings):
+            # 先に到着した "A" を遅く、後の "B" を速く → race を誘発
+            delay = 0.05 if text == "A" else 0.005
+            await asyncio.sleep(delay)
+            return text.encode()
+
+        msg_a = _make_message(guild_id=10008, channel_id=888, content="A")
+        msg_b = _make_message(guild_id=10008, channel_id=888, content="B")
+        # play_next 内で再生が走らないよう is_playing=True で止める
+        for m in (msg_a, msg_b):
+            m.guild.voice_client.is_connected.return_value = True
+            m.guild.voice_client.is_playing.return_value = True
+            m.guild.voice_client.is_paused.return_value = False
+
+        try:
+            with patch("bot.synthesize", side_effect=fake_synthesize):
+                # 同時 dispatch を asyncio.gather で再現
+                await asyncio.gather(on_message(msg_a), on_message(msg_b))
+
+            q = list(queues.get(10008, []))
+            assert q == [b"A", b"B"], f"順序が逆転: {q}"
+        finally:
+            read_channels.pop(10008, None)
+            queues.pop(10008, None)
+            play_locks.pop(10008, None)
+
 
 class TestOnVoiceStateUpdate:
     async def test_ignores_other_bot_when_no_vc(self):

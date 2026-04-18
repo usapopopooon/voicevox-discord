@@ -83,6 +83,10 @@ tree = app_commands.CommandTree(client)
 queues: dict[int, deque[bytes]] = {}
 read_channels: dict[int, int] = {}  # guild_id -> channel_id
 play_locks: dict[int, asyncio.Lock] = {}  # guild_id -> 再生開始の競合防止ロック
+# ギルド内での「合成 → queue 追加」順序を保証するロック。
+# 複数メッセージが同時到着した時、短文が先に合成完了して順序が逆転する race を防ぐ。
+# 代償としてギルド内は合成がシリアライズされる（ギルド間は並行）。
+synth_order_locks: dict[int, asyncio.Lock] = {}
 engine_error_notified_at: dict[int, float] = {}  # guild_id -> monotonic seconds
 ENGINE_ERROR_NOTIFY_INTERVAL = 30.0
 
@@ -92,11 +96,17 @@ def _ensure_queue(guild_id: int) -> deque[bytes]:
     return queues.setdefault(guild_id, deque())
 
 
+def _synth_order_lock(guild_id: int) -> asyncio.Lock:
+    """ギルド内での合成→queue追加の順序を保証するロック"""
+    return synth_order_locks.setdefault(guild_id, asyncio.Lock())
+
+
 def _cleanup_guild_state(guild_id: int) -> None:
     """ギルドごとの再生状態（キュー・読み上げch・ロック・通知タイムスタンプ）を破棄"""
     queues.pop(guild_id, None)
     read_channels.pop(guild_id, None)
     play_locks.pop(guild_id, None)
+    synth_order_locks.pop(guild_id, None)
     engine_error_notified_at.pop(guild_id, None)
 
 
@@ -169,11 +179,26 @@ characters: dict[str, list[tuple[int, str]]] = {}
 guild_dicts: dict[int, dict[str, str]] = {}
 guild_mutes: dict[int, set[int]] = {}  # guild_id -> set of muted user_ids
 
-# テキスト前処理用の正規表現
+# テキスト前処理用の正規表現（1パスで URL / メール / カスタム絵文字を置換）
+_CLEAN_TEXT_PATTERN = re.compile(
+    r"(?P<url>https?://\S+)"
+    r"|(?P<email>[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)"
+    r"|<a?:(?P<emoji>\w+):\d+>"
+)
+# 既存 import 互換のため個別パターンも残す
 URL_PATTERN = re.compile(r"https?://\S+")
 EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:(\w+):\d+>")
 MAX_READ_LENGTH = 100
+
+
+def _clean_text_replace(m: re.Match[str]) -> str:
+    if m.group("url") is not None:
+        return "URLしょうりゃく"
+    if m.group("email") is not None:
+        return "メールアドレスしょうりゃく"
+    return m.group("emoji")  # カスタム絵文字は名前だけ残す
+
 
 # DB接続プール
 db_pool: asyncpg.Pool | None = None
@@ -453,11 +478,8 @@ def is_muted(guild_id: int, user_id: int) -> bool:
 
 
 def clean_text(text: str) -> str:
-    """読み上げ用にテキストを前処理する"""
-    text = URL_PATTERN.sub("URLしょうりゃく", text)
-    text = EMAIL_PATTERN.sub("メールアドレスしょうりゃく", text)
-    text = CUSTOM_EMOJI_PATTERN.sub(r"\1", text)  # カスタム絵文字は名前だけ残す
-    return text.strip()
+    """読み上げ用にテキストを前処理する（1パスで URL/メール/カスタム絵文字を置換）"""
+    return _CLEAN_TEXT_PATTERN.sub(_clean_text_replace, text).strip()
 
 
 # Discord が要求する PCM フォーマット: 48kHz stereo s16le、20ms = 3840B/frame
@@ -1008,13 +1030,15 @@ async def join(interaction: discord.Interaction):
 
     # 接続時に音声で挨拶
     try:
-        settings = get_user_settings(guild.id, interaction.user.id)
-        audio_data = await synthesize("せつぞくしました", settings, cache=True)
+        async with _synth_order_lock(guild.id):
+            settings = get_user_settings(guild.id, interaction.user.id)
+            audio_data = await synthesize("せつぞくしました", settings, cache=True)
+            vc = guild.voice_client
+            if vc and _is_vc_connected(vc):
+                queues[guild.id].append(audio_data)
         vc = guild.voice_client
-        if vc and _is_vc_connected(vc):
-            queues[guild.id].append(audio_data)
-            if _can_start_playback(vc):
-                await play_next(guild.id, vc)
+        if vc and _is_vc_connected(vc) and _can_start_playback(vc):
+            await play_next(guild.id, vc)
     except Exception as e:
         logger.error(f"接続挨拶の音声合成エラー: {e}")
 
@@ -1073,14 +1097,15 @@ async def on_voice_state_update(
             if not vc or not vc.is_connected():
                 return
 
-            settings = get_user_settings(member.guild.id, member.id)
-            audio_data = await synthesize(text, settings, cache=True)
+            async with _synth_order_lock(guild_id):
+                settings = get_user_settings(member.guild.id, member.id)
+                audio_data = await synthesize(text, settings, cache=True)
 
-            vc = member.guild.voice_client
-            if not vc or not vc.is_connected():
-                return
+                vc = member.guild.voice_client
+                if not vc or not vc.is_connected():
+                    return
 
-            _ensure_queue(guild_id).append(audio_data)
+                _ensure_queue(guild_id).append(audio_data)
 
             if _can_start_playback(vc):
                 await play_next(guild_id, vc)
@@ -1419,12 +1444,15 @@ async def on_message(message: discord.Message):
     if len(text) > MAX_READ_LENGTH:
         text = text[:MAX_READ_LENGTH] + "、いかしょうりゃく"
 
+    guild_id = message.guild.id
+    # 合成→queue追加をロックで包んで到着順に並べる（並行タスクによる逆転防止）
     try:
-        settings = get_user_settings(message.guild.id, message.author.id)
-        audio_data = await synthesize(text, settings)
+        async with _synth_order_lock(guild_id):
+            settings = get_user_settings(guild_id, message.author.id)
+            audio_data = await synthesize(text, settings)
+            _ensure_queue(guild_id).append(audio_data)
     except aiohttp.ClientError:
         logger.warning("音声合成エンジンに接続できません（再起動中の可能性）")
-        guild_id = message.guild.id
         now = time.monotonic()
         last = engine_error_notified_at.get(guild_id, 0.0)
         if now - last >= ENGINE_ERROR_NOTIFY_INTERVAL:
@@ -1436,9 +1464,6 @@ async def on_message(message: discord.Message):
     except Exception as e:
         logger.error(f"音声合成エラー: {e}")
         return
-
-    guild_id = message.guild.id
-    _ensure_queue(guild_id).append(audio_data)
 
     if _can_start_playback(vc):
         await play_next(guild_id, vc)
@@ -1455,6 +1480,16 @@ if __name__ == "__main__":
         raise RuntimeError("DATABASE_URL environment variable is required")
     if not ENGINES:
         raise RuntimeError("VOICEVOX_URL など、少なくとも1つのTTSエンジンURLが必要です")
+
+    # 利用可能なら uvloop に差し替え（イベントループが 2〜4 倍高速）。
+    # Windows や未インストール環境では標準 asyncio のままフォールバック。
+    try:
+        import uvloop
+
+        uvloop.install()
+        logger.info("uvloop を有効化しました")
+    except ImportError:
+        logger.info("uvloop 未インストール、標準 asyncio ループで起動")
 
     for attempt in range(MAX_LOGIN_RETRIES):
         try:
