@@ -560,85 +560,92 @@ async def _refresh_speakers_if_needed() -> None:
         await fetch_speakers()
 
 
-def _append_synthesis_candidate(
-    candidates: list[tuple[str, int, str]],
-    seen: set[tuple[str, int]],
-    engine_url: str,
-    real_id: int,
-    reason: str,
-) -> None:
-    key = (engine_url, real_id)
-    if key in seen:
-        return
-    seen.add(key)
-    candidates.append((engine_url, real_id, reason))
+@dataclass(frozen=True)
+class _SynthCandidate:
+    """音声合成候補。(エンジンURL, 実speakerID, 選ばれた理由)"""
+
+    engine_url: str
+    real_id: int
+    reason: str
+
+
+def _synth_cache_key(
+    candidate: _SynthCandidate, text: str, settings: VoiceSettings
+) -> tuple:
+    """合成結果キャッシュのキーを作る"""
+    return (
+        candidate.engine_url,
+        candidate.real_id,
+        text,
+        settings.speed,
+        settings.pitch,
+        settings.intonation,
+        settings.volume,
+    )
+
+
+def _lookup_synth_cache(
+    candidates: list[_SynthCandidate], text: str, settings: VoiceSettings
+) -> bytes | None:
+    """候補のいずれかでキャッシュヒットすれば返す（LRU の最新に昇格）"""
+    for cand in candidates:
+        key = _synth_cache_key(cand, text, settings)
+        cached = _synth_cache.get(key)
+        if cached is not None:
+            _synth_cache.move_to_end(key)
+            return cached
+    return None
+
+
+def _store_synth_cache(primary_key: tuple, actual_key: tuple, data: bytes) -> None:
+    """合成結果をキャッシュ。primary と実候補が異なる場合は両方のキーで保存する"""
+    _synth_cache[actual_key] = data
+    _synth_cache.move_to_end(actual_key)
+    if actual_key != primary_key:
+        _synth_cache[primary_key] = data
+        _synth_cache.move_to_end(primary_key)
+    while len(_synth_cache) > _SYNTH_CACHE_MAX:
+        _synth_cache.popitem(last=False)
 
 
 async def _build_synthesis_candidates(
     requested_speaker_id: int,
-) -> list[tuple[str, int, str]]:
-    """音声合成の候補エンジンを優先順で構築する。"""
-    candidates: list[tuple[str, int, str]] = []
+) -> list[_SynthCandidate]:
+    """音声合成の候補エンジンを優先順で構築する（重複排除付き）。"""
     seen: set[tuple[str, int]] = set()
+    candidates: list[_SynthCandidate] = []
 
-    info = speaker_engine.get(requested_speaker_id)
-    if info is not None:
-        engine_url, real_id = info
-        _append_synthesis_candidate(
-            candidates,
-            seen,
-            engine_url,
-            real_id,
-            "requested_speaker",
-        )
+    def add(engine_url: str, real_id: int, reason: str) -> None:
+        key = (engine_url, real_id)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(_SynthCandidate(engine_url, real_id, reason))
 
+    # 1. 要求された speaker_id のマッピング
+    if (info := speaker_engine.get(requested_speaker_id)) is not None:
+        add(info[0], info[1], "requested_speaker")
+
+    # 2. speaker_engine が空なら再取得してから requested_speaker_id を再確認
     if not speaker_engine:
         await _refresh_speakers_if_needed()
-        info = speaker_engine.get(requested_speaker_id)
-        if info is not None:
-            engine_url, real_id = info
-            _append_synthesis_candidate(
-                candidates,
-                seen,
-                engine_url,
-                real_id,
-                "requested_after_refresh",
-            )
+        if (info := speaker_engine.get(requested_speaker_id)) is not None:
+            add(info[0], info[1], "requested_after_refresh")
 
-    default_info = speaker_engine.get(DEFAULT_SPEAKER)
-    if default_info is not None:
-        engine_url, real_id = default_info
-        _append_synthesis_candidate(
-            candidates,
-            seen,
-            engine_url,
-            real_id,
-            "default_speaker_mapping",
-        )
+    # 3. DEFAULT_SPEAKER のマッピング
+    if (info := speaker_engine.get(DEFAULT_SPEAKER)) is not None:
+        add(info[0], info[1], "default_speaker_mapping")
 
-    if speaker_engine:
-        # マッピングに存在する候補から speaker_id の小さい順に 3 件追加
-        for global_id in sorted(speaker_engine.keys())[:3]:
-            engine_url, real_id = speaker_engine[global_id]
-            _append_synthesis_candidate(
-                candidates,
-                seen,
-                engine_url,
-                real_id,
-                "cached_speaker_fallback",
-            )
+    # 4. キャッシュに存在する speaker_id の小さい順に 3 件
+    for global_id in sorted(speaker_engine.keys())[:3]:
+        info = speaker_engine[global_id]
+        add(info[0], info[1], "cached_speaker_fallback")
 
-    # 最終手段: 各エンジンへ DEFAULT_SPEAKER を直接投げる。
+    # 5. 最終手段: 各エンジンへ DEFAULT_SPEAKER を直接投げる。
     # 注意: DEFAULT_SPEAKER は VOICEVOX のデフォルト値（3=ずんだもん）が前提。
     # COEIROINK/SHAREVOX 単体運用の場合は DEFAULT_SPEAKER_ID を適切に設定すること。
     for _, engine_url, _ in ENGINES:
-        _append_synthesis_candidate(
-            candidates,
-            seen,
-            engine_url,
-            DEFAULT_SPEAKER,
-            "raw_default_id",
-        )
+        add(engine_url, DEFAULT_SPEAKER, "raw_default_id")
 
     return candidates
 
@@ -685,8 +692,78 @@ def get_user_settings(guild_id: int, user_id: int) -> VoiceSettings:
     return user_settings.get((0, user_id), VoiceSettings())
 
 
+async def _try_candidate(
+    cand: _SynthCandidate,
+    text: str,
+    settings: VoiceSettings,
+    primary_key: tuple | None,
+) -> bytes:
+    """候補を1つ試して成功データを返す。成功時はキャッシュ保存とバックオフ解除も行う。
+    失敗時はバックオフを設定し、元の例外を再送出する。"""
+    pair = (cand.engine_url, cand.real_id)
+    try:
+        data = await _synthesize_with_candidate(
+            cand.engine_url, cand.real_id, text, settings
+        )
+    except (aiohttp.ClientError, TimeoutError):
+        _candidate_fail_until[pair] = time.monotonic() + CANDIDATE_FAIL_BACKOFF_SECONDS
+        raise
+
+    _candidate_fail_until.pop(pair, None)
+    if primary_key is not None:
+        _store_synth_cache(primary_key, _synth_cache_key(cand, text, settings), data)
+    return data
+
+
+async def _run_candidates(
+    candidates: list[_SynthCandidate],
+    text: str,
+    settings: VoiceSettings,
+    primary_key: tuple | None,
+) -> bytes:
+    """候補を順に試して最初に成功したものを返す。全滅時は例外を送出する。"""
+    last_error: Exception | None = None
+    attempted = False
+    now = time.monotonic()
+
+    for idx, cand in enumerate(candidates):
+        if _candidate_fail_until.get((cand.engine_url, cand.real_id), 0.0) > now:
+            continue  # バックオフ中はスキップ
+        attempted = True
+        try:
+            data = await _try_candidate(cand, text, settings, primary_key)
+            if idx > 0:
+                logger.warning(
+                    f"音声合成フォールバック成功: reason={cand.reason}, "
+                    f"engine={cand.engine_url}, speaker={cand.real_id}"
+                )
+            return data
+        except (aiohttp.ClientError, TimeoutError) as e:
+            last_error = e
+            logger.warning(
+                f"音声合成候補失敗: reason={cand.reason}, engine={cand.engine_url}, "
+                f"speaker={cand.real_id}, error={e}"
+            )
+
+    # 全候補がバックオフ中で 1 つも試行しなかった → 先頭候補を強制プローブ
+    if not attempted:
+        cand = candidates[0]
+        try:
+            return await _try_candidate(cand, text, settings, primary_key)
+        except (aiohttp.ClientError, TimeoutError) as e:
+            last_error = e
+            logger.warning(
+                f"音声合成候補失敗（プローブ）: reason={cand.reason}, "
+                f"engine={cand.engine_url}, speaker={cand.real_id}, error={e}"
+            )
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("音声合成に失敗しました（全フォールバック候補失敗）")
+
+
 async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) -> bytes:
-    """エンジンでテキストを音声合成してwavバイトを返す。
+    """エンジンでテキストを音声合成して wav バイトを返す。
 
     cache=True の時のみ結果を LRU キャッシュする。挨拶や入退室通知など
     繰り返し発声される定型文に対して指定する。
@@ -698,153 +775,31 @@ async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) ->
     if not candidates:
         raise RuntimeError("音声合成候補がありません。エンジン設定を確認してください")
 
-    primary_engine_url, primary_real_id, _ = candidates[0]
+    if not cache:
+        return await _run_candidates(candidates, text, settings, primary_key=None)
 
-    cache_key = None
-    in_flight_event: asyncio.Event | None = None
-    if cache:
-        cache_key = (
-            primary_engine_url,
-            primary_real_id,
-            text,
-            settings.speed,
-            settings.pitch,
-            settings.intonation,
-            settings.volume,
-        )
-        # キャッシュ確認 → in-flight 待機 → 再度キャッシュ確認 の順で重複HTTPを防ぐ
-        cached = _synth_cache.get(cache_key)
+    primary_key = _synth_cache_key(candidates[0], text, settings)
+
+    # キャッシュ確認 → in-flight 待機 → 再度キャッシュ確認 の順で重複HTTPを防ぐ
+    cached = _lookup_synth_cache(candidates, text, settings)
+    if cached is not None:
+        return cached
+
+    in_flight = _synth_in_flight.get(primary_key)
+    if in_flight is not None:
+        await in_flight.wait()
+        cached = _lookup_synth_cache(candidates, text, settings)
         if cached is not None:
-            _synth_cache.move_to_end(cache_key)
             return cached
+        # 先行タスクが失敗した → 自分で再合成する
 
-        # 主候補がミスでも、同一パラメータで過去にフォールバック成功済みなら再利用
-        for engine_url, real_id, _ in candidates[1:]:
-            alt_key = (
-                engine_url,
-                real_id,
-                text,
-                settings.speed,
-                settings.pitch,
-                settings.intonation,
-                settings.volume,
-            )
-            alt_cached = _synth_cache.get(alt_key)
-            if alt_cached is not None:
-                _synth_cache.move_to_end(alt_key)
-                return alt_cached
-
-        in_flight = _synth_in_flight.get(cache_key)
-        if in_flight is not None:
-            await in_flight.wait()
-            cached = _synth_cache.get(cache_key)
-            if cached is not None:
-                _synth_cache.move_to_end(cache_key)
-                return cached
-            # 先行タスクが失敗した → 自分で再合成する（以下のフローへ）
-
-        in_flight_event = asyncio.Event()
-        _synth_in_flight[cache_key] = in_flight_event
-
+    in_flight_event = asyncio.Event()
+    _synth_in_flight[primary_key] = in_flight_event
     try:
-        last_error: Exception | None = None
-        attempted = False
-        now = time.monotonic()
-        for idx, (engine_url, real_id, reason) in enumerate(candidates):
-            candidate_key = (engine_url, real_id)
-            fail_until = _candidate_fail_until.get(candidate_key, 0.0)
-            if fail_until > now:
-                continue
-            attempted = True
-            try:
-                data = await _synthesize_with_candidate(
-                    engine_url,
-                    real_id,
-                    text,
-                    settings,
-                )
-                _candidate_fail_until.pop(candidate_key, None)
-                if idx > 0:
-                    logger.warning(
-                        f"音声合成フォールバック成功: reason={reason}, "
-                        f"engine={engine_url}, speaker={real_id}"
-                    )
-
-                if cache_key is not None:
-                    key = (
-                        engine_url,
-                        real_id,
-                        text,
-                        settings.speed,
-                        settings.pitch,
-                        settings.intonation,
-                        settings.volume,
-                    )
-                    _synth_cache[key] = data
-                    _synth_cache.move_to_end(key)
-                    # primary 候補と実際に成功した候補が異なる場合、
-                    # 次回 primary キーで lookup した時もヒットするよう二重保存する
-                    if key != cache_key:
-                        _synth_cache[cache_key] = data
-                        _synth_cache.move_to_end(cache_key)
-                    while len(_synth_cache) > _SYNTH_CACHE_MAX:
-                        _synth_cache.popitem(last=False)
-
-                return data
-            except (aiohttp.ClientError, TimeoutError) as e:
-                last_error = e
-                _candidate_fail_until[candidate_key] = (
-                    time.monotonic() + CANDIDATE_FAIL_BACKOFF_SECONDS
-                )
-                logger.warning(
-                    f"音声合成候補失敗: reason={reason}, engine={engine_url}, "
-                    f"speaker={real_id}, error={e}"
-                )
-
-        # すべてバックオフ中で未試行なら、先頭候補を1回だけプローブする
-        if not attempted and candidates:
-            engine_url, real_id, reason = candidates[0]
-            candidate_key = (engine_url, real_id)
-            try:
-                data = await _synthesize_with_candidate(
-                    engine_url,
-                    real_id,
-                    text,
-                    settings,
-                )
-                _candidate_fail_until.pop(candidate_key, None)
-                if cache_key is not None:
-                    key = (
-                        engine_url,
-                        real_id,
-                        text,
-                        settings.speed,
-                        settings.pitch,
-                        settings.intonation,
-                        settings.volume,
-                    )
-                    _synth_cache[key] = data
-                    _synth_cache.move_to_end(key)
-                    while len(_synth_cache) > _SYNTH_CACHE_MAX:
-                        _synth_cache.popitem(last=False)
-                return data
-            except (aiohttp.ClientError, TimeoutError) as e:
-                last_error = e
-                _candidate_fail_until[candidate_key] = (
-                    time.monotonic() + CANDIDATE_FAIL_BACKOFF_SECONDS
-                )
-                logger.warning(
-                    f"音声合成候補失敗: reason={reason}, engine={engine_url}, "
-                    f"speaker={real_id}, error={e}"
-                )
-
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("音声合成に失敗しました（全フォールバック候補失敗）")
+        return await _run_candidates(candidates, text, settings, primary_key)
     finally:
-        if cache_key is not None and in_flight_event is not None:
-            _synth_in_flight.pop(cache_key, None)
-            in_flight_event.set()
+        _synth_in_flight.pop(primary_key, None)
+        in_flight_event.set()
 
 
 async def play_next(guild_id: int, vc: discord.VoiceClient):

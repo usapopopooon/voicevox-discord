@@ -660,8 +660,8 @@ class TestSynthesizeFallback:
             )
             # requested/default が無いとき、
             # cached_speaker_fallback は global_id の小さい順
-            cached = [c for c in candidates if c[2] == "cached_speaker_fallback"]
-            assert [real_id for _, real_id, _ in cached] == [1, 2, 50]
+            cached = [c for c in candidates if c.reason == "cached_speaker_fallback"]
+            assert [c.real_id for c in cached] == [1, 2, 50]
         finally:
             bot.speaker_engine.clear()
             bot.speaker_engine.update(original)
@@ -687,7 +687,7 @@ class TestSynthesizeFallback:
             bot.speaker_engine[12] = ("http://cached-c:50021", 12)
 
             candidates = await bot._build_synthesis_candidates(999)
-            reasons = [r for _, _, r in candidates]
+            reasons = [c.reason for c in candidates]
 
             assert reasons[0] == "requested_speaker"
             assert "default_speaker_mapping" in reasons
@@ -720,8 +720,8 @@ class TestSynthesizeFallback:
             candidates = await bot._build_synthesis_candidates(42)
             dedup_count = sum(
                 1
-                for engine_url, real_id, _ in candidates
-                if (engine_url, real_id) == ("http://dup:50021", 3)
+                for c in candidates
+                if (c.engine_url, c.real_id) == ("http://dup:50021", 3)
             )
             assert dedup_count == 1
         finally:
