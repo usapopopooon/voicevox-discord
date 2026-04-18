@@ -76,8 +76,15 @@ class TtsClient(discord.Client):
         await super().close()
 
 
-client = TtsClient(intents=intents)
+# chunk_guilds_at_startup=False: 起動時に全ギルドのメンバーを一括キャッシュしない
+# （大規模ギルドで数十〜数百MB節約）。必要時は guild.get_member() で参照し、
+# キャッシュミスは None 許容のため現状コードと互換。
+client = TtsClient(intents=intents, chunk_guilds_at_startup=False)
 tree = app_commands.CommandTree(client)
+
+# ギルドあたりの再生キュー最大長。1件あたり最大 ~500KB なので maxlen=64 で ~32MB 上限。
+# スパム時は古い音声から自動ドロップしてメモリ使用量を制限する。
+QUEUE_MAXLEN = 64
 
 # ギルドごとの再生キューと読み上げ対象チャンネル
 queues: dict[int, deque[bytes]] = {}
@@ -91,9 +98,14 @@ engine_error_notified_at: dict[int, float] = {}  # guild_id -> monotonic seconds
 ENGINE_ERROR_NOTIFY_INTERVAL = 30.0
 
 
+def _new_queue() -> deque[bytes]:
+    """ギルド用の音声キューを新規作成（maxlen 付き）"""
+    return deque(maxlen=QUEUE_MAXLEN)
+
+
 def _ensure_queue(guild_id: int) -> deque[bytes]:
-    """guild_id のキューを取得（無ければ作成）"""
-    return queues.setdefault(guild_id, deque())
+    """guild_id のキューを取得（無ければ maxlen 付きで作成）"""
+    return queues.setdefault(guild_id, _new_queue())
 
 
 def _synth_order_lock(guild_id: int) -> asyncio.Lock:
@@ -208,13 +220,25 @@ db_init_lock = asyncio.Lock()
 _dict_patterns: dict[int, re.Pattern[str]] = {}
 
 # 合成結果の LRU キャッシュ（cache=True でのみ使用）
+# 1件あたり最大 ~500KB。max=32 で ~16MB に抑制。挨拶・入退室通知など
+# 繰り返し呼ばれる定型文は十分にヒットする。
 _synth_cache: OrderedDict[tuple, bytes] = OrderedDict()
-_SYNTH_CACHE_MAX = 64
+_SYNTH_CACHE_MAX = 32
 # 同じキーで同時に合成が走らないよう in-flight 管理
 _synth_in_flight: dict[tuple, asyncio.Event] = {}
 # 失敗した合成候補の短期バックオフ（engine_url, real_id）-> monotonic deadline
 _candidate_fail_until: dict[tuple[str, int], float] = {}
 CANDIDATE_FAIL_BACKOFF_SECONDS = 10.0
+
+
+def _prune_candidate_fail_until() -> None:
+    """期限切れの候補バックオフ entry を削除して dict 肥大化を防ぐ"""
+    now = time.monotonic()
+    expired = [k for k, deadline in _candidate_fail_until.items() if deadline <= now]
+    for k in expired:
+        _candidate_fail_until.pop(k, None)
+
+
 # speaker_engine 空時の再取得を間引く
 _speaker_refresh_lock = asyncio.Lock()
 _last_speaker_refresh_attempt = 0.0
@@ -248,7 +272,10 @@ async def init_db():
 
         for attempt in range(5):
             try:
-                db_pool = await asyncpg.create_pool(DATABASE_URL)
+                # 小規模 Bot 向けに接続数を絞ってメモリ節約（各接続 ~1-2MB）
+                db_pool = await asyncpg.create_pool(
+                    DATABASE_URL, min_size=1, max_size=5
+                )
                 break
             except (OSError, asyncpg.PostgresError) as e:
                 if attempt < 4:
@@ -744,6 +771,7 @@ async def _run_candidates(
     primary_key: tuple | None,
 ) -> bytes:
     """候補を順に試して最初に成功したものを返す。全滅時は例外を送出する。"""
+    _prune_candidate_fail_until()  # 期限切れ entry を定期的に掃除
     last_error: Exception | None = None
     attempted = False
     now = time.monotonic()
@@ -952,6 +980,22 @@ async def on_ready():
         logger.warning(f"スピーカー一覧の取得に失敗しました: {e}")
 
 
+@client.event
+async def on_guild_remove(guild: discord.Guild):
+    """Bot がギルドから外れた時のメモリ解放。
+    DB エントリは他サーバーで再招待される可能性があるため残置する。"""
+    guild_id = guild.id
+    _cleanup_guild_state(guild_id)
+    guild_dicts.pop(guild_id, None)
+    guild_mutes.pop(guild_id, None)
+    _dict_patterns.pop(guild_id, None)
+    # このギルドに属する user_settings エントリをメモリから削除
+    stale_keys = [k for k in user_settings if k[0] == guild_id]
+    for k in stale_keys:
+        user_settings.pop(k, None)
+    logger.info(f"ギルド退出によりメモリ状態を解放 (Guild: {guild_id})")
+
+
 @tree.command(name="join", description="ボイスチャンネルに接続")
 async def join(interaction: discord.Interaction):
     guild = await _require_guild_interaction(interaction)
@@ -1000,7 +1044,7 @@ async def join(interaction: discord.Interaction):
         _ensure_queue(guild.id)
     else:
         # 新規接続: 切断クリーンアップ漏れ等で残存する古いキューを破棄
-        queues[guild.id] = deque()
+        queues[guild.id] = _new_queue()
     read_channels[guild.id] = interaction.channel_id
 
     embed = discord.Embed(

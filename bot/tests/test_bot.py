@@ -370,6 +370,73 @@ class TestApplyDictAdditional:
             guild_dicts.pop(667, None)
 
 
+class TestMemoryOptimizations:
+    """メモリ節約系の挙動を検証するテスト"""
+
+    def test_queue_drops_oldest_when_maxlen_exceeded(self):
+        """_ensure_queue が maxlen 付き deque を返し、溢れた分は古い方から落ちる"""
+        from bot import QUEUE_MAXLEN, _ensure_queue, queues
+
+        queues.pop(7777, None)
+        try:
+            q = _ensure_queue(7777)
+            assert q.maxlen == QUEUE_MAXLEN
+            for i in range(QUEUE_MAXLEN + 5):
+                q.append(f"a{i}".encode())
+            assert len(q) == QUEUE_MAXLEN
+            assert q[0] == f"a{5}".encode()
+            assert q[-1] == f"a{QUEUE_MAXLEN + 4}".encode()
+        finally:
+            queues.pop(7777, None)
+
+    async def test_on_guild_remove_cleans_all_state(self):
+        """Bot がギルドから外れた時、ギルド固有状態を全て解放する"""
+        import re as _re
+
+        import bot
+        from bot import VoiceSettings, on_guild_remove
+
+        bot.guild_dicts[8888] = {"w": "ダブリュー"}
+        bot.guild_mutes[8888] = {123}
+        bot._dict_patterns[8888] = _re.compile("w")
+        bot.user_settings[(8888, 1)] = VoiceSettings()
+        bot.user_settings[(8888, 2)] = VoiceSettings()
+        bot.user_settings[(9999, 1)] = VoiceSettings()
+
+        guild = MagicMock()
+        guild.id = 8888
+        try:
+            await on_guild_remove(guild)
+            assert 8888 not in bot.guild_dicts
+            assert 8888 not in bot.guild_mutes
+            assert 8888 not in bot._dict_patterns
+            assert (8888, 1) not in bot.user_settings
+            assert (8888, 2) not in bot.user_settings
+            assert (9999, 1) in bot.user_settings  # 別ギルドは保持
+        finally:
+            bot.guild_dicts.pop(8888, None)
+            bot.guild_mutes.pop(8888, None)
+            bot._dict_patterns.pop(8888, None)
+            bot.user_settings.pop((9999, 1), None)
+
+    def test_prune_candidate_fail_until_removes_expired(self):
+        """期限切れバックオフ entry が削除され、未期限は残る"""
+        import time
+
+        import bot
+        from bot import _prune_candidate_fail_until
+
+        now = time.monotonic()
+        bot._candidate_fail_until[("http://dead", 1)] = now - 100.0
+        bot._candidate_fail_until[("http://alive", 2)] = now + 100.0
+        try:
+            _prune_candidate_fail_until()
+            assert ("http://dead", 1) not in bot._candidate_fail_until
+            assert ("http://alive", 2) in bot._candidate_fail_until
+        finally:
+            bot._candidate_fail_until.clear()
+
+
 class TestPlayNextAdditional:
     async def test_state_check_client_exception_skips(self):
         import discord
