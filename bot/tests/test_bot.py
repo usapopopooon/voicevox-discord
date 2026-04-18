@@ -509,16 +509,30 @@ class TestFetchSpeakers:
 
 class TestSynthesizeFallback:
     async def test_falls_back_to_default_speaker(self):
+        import bot
         from bot import VoiceSettings, synthesize
 
-        # speaker_engine が未登録 → DEFAULT_SPEAKER=3 でエンジンに投げる
-        with aioresponses() as m:
-            m.post(re.compile(r".*audio_query.*"), payload={})
-            m.post(re.compile(r".*synthesis.*"), body=b"fallback-data")
-            result = await synthesize("テスト", VoiceSettings(speaker_id=99999))
-            assert result == b"fallback-data"
-            audio_query_call = list(m.requests.values())[0][0]
-            assert audio_query_call.kwargs["params"]["speaker"] == 3
+        # DEFAULT_SPEAKER=3 のマッピングは登録済み、指定 speaker_id は未登録のケース
+        bot.speaker_engine[3] = ("http://test-voicevox:50021", 3)
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"fallback-data")
+                result = await synthesize("テスト", VoiceSettings(speaker_id=99999))
+                assert result == b"fallback-data"
+                audio_query_call = list(m.requests.values())[0][0]
+                assert audio_query_call.kwargs["params"]["speaker"] == 3
+        finally:
+            bot.speaker_engine.pop(3, None)
+
+    async def test_raises_when_speaker_engine_empty(self):
+        """speaker_engine が完全に空（fetch_speakers 失敗等）の場合は明示的にエラー"""
+        import bot
+        from bot import VoiceSettings, synthesize
+
+        bot.speaker_engine.clear()
+        with pytest.raises(RuntimeError, match="スピーカー情報"):
+            await synthesize("テスト", VoiceSettings(speaker_id=99999))
 
     async def test_uses_mapped_real_id(self):
         import bot
@@ -1297,6 +1311,34 @@ class TestOnVoiceStateUpdate:
             # 例外は外に出ない
             await on_voice_state_update(member, before, after)
 
+    async def test_auto_disconnect_swallows_exception(self):
+        """vc.disconnect() が例外を投げても後始末が継続すること"""
+        from bot import on_voice_state_update, play_locks, queues, read_channels
+
+        member = MagicMock()
+        member.bot = False
+        member.guild.id = 5010
+        vc = member.guild.voice_client
+        vc.is_connected.return_value = True
+        vc.disconnect = AsyncMock(side_effect=Exception("already disconnected"))
+        bot_member = MagicMock()
+        bot_member.bot = True
+        vc.channel.members = [bot_member]
+        queues[5010] = deque()
+        read_channels[5010] = 100
+        play_locks[5010] = MagicMock()
+        try:
+            # 例外が外に漏れないこと
+            await on_voice_state_update(member, MagicMock(), MagicMock())
+            # 例外でも後始末は進む
+            assert 5010 not in queues
+            assert 5010 not in read_channels
+            assert 5010 not in play_locks
+        finally:
+            queues.pop(5010, None)
+            read_channels.pop(5010, None)
+            play_locks.pop(5010, None)
+
     async def test_bot_disconnect_cleans_guild_state(self):
         from bot import (
             client,
@@ -1435,9 +1477,36 @@ class TestJoinCommand:
         with patch("bot.synthesize", new=AsyncMock(return_value=b"hi")):
             await join.callback(interaction)
         assert 9001 in queues
-        # 旧キューが破棄される（このモックでは接続後vc未セットなので挨拶は積まれない）
+        # 新規接続の場合は旧キューを破棄（切断時のクリーンアップ漏れ対策）
         assert len(queues[9001]) == 0
         queues.pop(9001, None)
+
+    async def test_preserves_queue_on_move_to(self):
+        """既に接続中のBotを別VCへ移動する場合、待機中キューは保持される"""
+        from bot import join, play_locks, queues
+
+        interaction = _make_interaction(guild_id=9003, user_id=9004)
+        channel = MagicMock()
+        channel.user_limit = 0
+        perms = MagicMock()
+        perms.connect = True
+        perms.speak = True
+        channel.permissions_for.return_value = perms
+        interaction.user.voice = MagicMock()
+        interaction.user.voice.channel = channel
+        # 既に接続中（voice_client が Truthy、move_to は AsyncMock）
+        interaction.guild.voice_client.move_to = AsyncMock()
+        # 挨拶の play_next で再生が走らないよう is_connected=False にしておく
+        interaction.guild.voice_client.is_connected.return_value = False
+
+        queues[9003] = deque([b"queued-audio"])
+        with patch("bot.synthesize", new=AsyncMock(return_value=b"hi")):
+            await join.callback(interaction)
+        assert 9003 in queues
+        # 移動時は待機中の音声が保持される
+        assert b"queued-audio" in queues[9003]
+        queues.pop(9003, None)
+        play_locks.pop(9003, None)
 
     async def test_rejects_when_bot_member_unavailable(self):
         from bot import join
@@ -1622,3 +1691,572 @@ class TestDictModals:
             assert 7004 not in bot.guild_dicts
         finally:
             bot.guild_dicts.pop(7004, None)
+
+
+class TestSharedHttpSession:
+    """共有 aiohttp.ClientSession による接続再利用"""
+
+    async def test_get_http_session_returns_session(self):
+        import aiohttp
+
+        from bot import close_http_session, get_http_session
+
+        try:
+            session = await get_http_session()
+            assert isinstance(session, aiohttp.ClientSession)
+            assert not session.closed
+        finally:
+            await close_http_session()
+
+    async def test_get_http_session_reuses_instance(self):
+        from bot import close_http_session, get_http_session
+
+        try:
+            s1 = await get_http_session()
+            s2 = await get_http_session()
+            assert s1 is s2
+        finally:
+            await close_http_session()
+
+    async def test_close_http_session_clears_cached(self):
+        import bot
+        from bot import close_http_session, get_http_session
+
+        await get_http_session()
+        await close_http_session()
+        assert bot._http_session is None or bot._http_session.closed
+
+    async def test_get_http_session_recreates_after_close(self):
+        from bot import close_http_session, get_http_session
+
+        try:
+            s1 = await get_http_session()
+            await close_http_session()
+            s2 = await get_http_session()
+            assert s1 is not s2
+            assert not s2.closed
+        finally:
+            await close_http_session()
+
+    async def test_synthesize_uses_shared_session(self):
+        """synthesize が共有セッションを使っても既存の期待動作は壊れない"""
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"data1")
+                result1 = await synthesize("あ", VoiceSettings())
+                assert result1 == b"data1"
+
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"data2")
+                result2 = await synthesize("い", VoiceSettings())
+                assert result2 == b"data2"
+        finally:
+            await close_http_session()
+
+
+class TestDictPatternCache:
+    """apply_dict のコンパイル済みパターンキャッシュ"""
+
+    def test_pattern_cached_after_first_call(self):
+        import bot
+        from bot import apply_dict, guild_dicts
+
+        guild_dicts[9101] = {"a": "A", "b": "B"}
+        bot._dict_patterns.pop(9101, None)
+        try:
+            assert 9101 not in bot._dict_patterns
+            apply_dict(9101, "a b")
+            assert 9101 in bot._dict_patterns
+        finally:
+            guild_dicts.pop(9101, None)
+            bot._dict_patterns.pop(9101, None)
+
+    def test_pattern_reused_on_second_call(self):
+        import bot
+        from bot import apply_dict, guild_dicts
+
+        guild_dicts[9102] = {"a": "A"}
+        try:
+            apply_dict(9102, "a")
+            pat1 = bot._dict_patterns[9102]
+            apply_dict(9102, "aa")
+            pat2 = bot._dict_patterns[9102]
+            assert pat1 is pat2
+        finally:
+            guild_dicts.pop(9102, None)
+            bot._dict_patterns.pop(9102, None)
+
+    def test_empty_dict_does_not_populate_cache(self):
+        import bot
+        from bot import apply_dict
+
+        bot._dict_patterns.pop(9103, None)
+        apply_dict(9103, "hello")
+        assert 9103 not in bot._dict_patterns
+
+    async def test_add_dict_entry_invalidates_cache(self, mock_db_pool):
+        import bot
+        from bot import add_dict_entry, guild_dicts
+
+        guild_dicts[9104] = {"a": "A"}
+        try:
+            from bot import apply_dict
+
+            apply_dict(9104, "a")
+            assert 9104 in bot._dict_patterns
+
+            guild_dicts[9104]["b"] = "B"
+            await add_dict_entry(9104, "b", "B")
+            assert 9104 not in bot._dict_patterns
+        finally:
+            guild_dicts.pop(9104, None)
+            bot._dict_patterns.pop(9104, None)
+
+    async def test_delete_dict_entry_invalidates_cache(self, mock_db_pool):
+        import bot
+        from bot import apply_dict, delete_dict_entry, guild_dicts
+
+        guild_dicts[9105] = {"a": "A"}
+        try:
+            apply_dict(9105, "a")
+            assert 9105 in bot._dict_patterns
+
+            await delete_dict_entry(9105, "a")
+            assert 9105 not in bot._dict_patterns
+        finally:
+            guild_dicts.pop(9105, None)
+            bot._dict_patterns.pop(9105, None)
+
+    async def test_load_guild_dicts_resets_all_caches(self, mock_db_pool):
+        import bot
+        from bot import apply_dict, guild_dicts, load_guild_dicts
+
+        guild_dicts[9106] = {"a": "A"}
+        guild_dicts[9107] = {"b": "B"}
+        apply_dict(9106, "a")
+        apply_dict(9107, "b")
+        assert 9106 in bot._dict_patterns
+        assert 9107 in bot._dict_patterns
+
+        _, conn = mock_db_pool
+        conn.fetch.return_value = []
+        try:
+            await load_guild_dicts()
+            assert bot._dict_patterns == {}
+        finally:
+            bot._dict_patterns.clear()
+            guild_dicts.pop(9106, None)
+            guild_dicts.pop(9107, None)
+
+    async def test_modal_add_invalidates_cache(self, mock_db_pool):
+        import bot
+        from bot import DictAddModal, apply_dict, guild_dicts
+
+        guild_dicts[9108] = {"a": "A"}
+        apply_dict(9108, "a")
+        assert 9108 in bot._dict_patterns
+
+        modal = DictAddModal(9108)
+        modal.word = MagicMock()
+        modal.word.value = "c"
+        modal.reading = MagicMock()
+        modal.reading.value = "シー"
+        interaction = MagicMock()
+        interaction.response.edit_message = AsyncMock()
+        try:
+            await modal.on_submit(interaction)
+            assert 9108 not in bot._dict_patterns
+        finally:
+            guild_dicts.pop(9108, None)
+            bot._dict_patterns.pop(9108, None)
+
+    async def test_modal_delete_invalidates_cache(self, mock_db_pool):
+        import bot
+        from bot import DictDeleteModal, apply_dict, guild_dicts
+
+        guild_dicts[9109] = {"a": "A", "b": "B"}
+        apply_dict(9109, "a b")
+        assert 9109 in bot._dict_patterns
+
+        modal = DictDeleteModal(9109)
+        modal.word = MagicMock()
+        modal.word.value = "a"
+        interaction = MagicMock()
+        interaction.response.edit_message = AsyncMock()
+        try:
+            await modal.on_submit(interaction)
+            assert 9109 not in bot._dict_patterns
+        finally:
+            guild_dicts.pop(9109, None)
+            bot._dict_patterns.pop(9109, None)
+
+    def test_cache_produces_same_output_after_invalidation(self):
+        """キャッシュ再コンパイル後も置換結果が同じであること"""
+        import bot
+        from bot import apply_dict, guild_dicts
+
+        guild_dicts[9110] = {"x": "X"}
+        try:
+            r1 = apply_dict(9110, "x")
+            assert r1 == "X"
+            bot._dict_patterns.pop(9110, None)
+            r2 = apply_dict(9110, "x")
+            assert r2 == "X"
+        finally:
+            guild_dicts.pop(9110, None)
+            bot._dict_patterns.pop(9110, None)
+
+
+class TestSynthesizeCache:
+    """合成結果の LRU キャッシュ（cache=True の時のみ有効）"""
+
+    async def test_default_no_cache(self):
+        """cache を渡さない場合はキャッシュしないこと（連投で2回HTTPが来る）"""
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        bot._synth_cache.clear()
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"one")
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"two")
+                r1 = await synthesize("同じテキスト", VoiceSettings())
+                r2 = await synthesize("同じテキスト", VoiceSettings())
+                # それぞれのモックが使われて2回HTTPが発生したはず
+                assert r1 == b"one"
+                assert r2 == b"two"
+        finally:
+            await close_http_session()
+            bot._synth_cache.clear()
+
+    async def test_cache_hit_skips_http(self):
+        """cache=True の2回目はHTTPを叩かない"""
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        bot._synth_cache.clear()
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"cached")
+                r1 = await synthesize("せつぞくしました", VoiceSettings(), cache=True)
+                # 2回目はHTTPモック登録なしで呼ぶ → キャッシュヒットで成功するはず
+                r2 = await synthesize("せつぞくしました", VoiceSettings(), cache=True)
+                assert r1 == b"cached"
+                assert r2 == b"cached"
+        finally:
+            await close_http_session()
+            bot._synth_cache.clear()
+
+    async def test_cache_key_includes_settings(self):
+        """異なる設定では別キーとして扱われる"""
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        bot._synth_cache.clear()
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"a")
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"b")
+                r1 = await synthesize("挨拶", VoiceSettings(speed=1.0), cache=True)
+                r2 = await synthesize("挨拶", VoiceSettings(speed=1.5), cache=True)
+                assert r1 == b"a"
+                assert r2 == b"b"
+        finally:
+            await close_http_session()
+            bot._synth_cache.clear()
+
+    async def test_cache_key_includes_text(self):
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        bot._synth_cache.clear()
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"x")
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"y")
+                r1 = await synthesize("A", VoiceSettings(), cache=True)
+                r2 = await synthesize("B", VoiceSettings(), cache=True)
+                assert r1 == b"x"
+                assert r2 == b"y"
+        finally:
+            await close_http_session()
+            bot._synth_cache.clear()
+
+    async def test_lru_eviction(self):
+        """キャッシュ上限を超えると古いエントリが追い出される"""
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        bot._synth_cache.clear()
+        original_max = bot._SYNTH_CACHE_MAX
+        bot._SYNTH_CACHE_MAX = 2
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={}, repeat=True)
+                m.post(re.compile(r".*synthesis.*"), body=b"1", repeat=True)
+                await synthesize("A", VoiceSettings(), cache=True)
+                await synthesize("B", VoiceSettings(), cache=True)
+                assert len(bot._synth_cache) == 2
+                await synthesize("C", VoiceSettings(), cache=True)
+                # 最も古い A が追い出される
+                assert len(bot._synth_cache) == 2
+                keys_text = {k[2] for k in bot._synth_cache}
+                assert "A" not in keys_text
+                assert "B" in keys_text
+                assert "C" in keys_text
+        finally:
+            bot._SYNTH_CACHE_MAX = original_max
+            await close_http_session()
+            bot._synth_cache.clear()
+
+    async def test_cache_hit_promotes_entry(self):
+        """ヒットしたキーはLRUで最新扱いになる"""
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        bot._synth_cache.clear()
+        original_max = bot._SYNTH_CACHE_MAX
+        bot._SYNTH_CACHE_MAX = 2
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={}, repeat=True)
+                m.post(re.compile(r".*synthesis.*"), body=b"x", repeat=True)
+                await synthesize("A", VoiceSettings(), cache=True)
+                await synthesize("B", VoiceSettings(), cache=True)
+                # A にアクセス → A は最新に
+                await synthesize("A", VoiceSettings(), cache=True)
+                # C を追加 → B が追い出される
+                await synthesize("C", VoiceSettings(), cache=True)
+                keys_text = {k[2] for k in bot._synth_cache}
+                assert "A" in keys_text
+                assert "C" in keys_text
+                assert "B" not in keys_text
+        finally:
+            bot._SYNTH_CACHE_MAX = original_max
+            await close_http_session()
+            bot._synth_cache.clear()
+
+    async def test_cache_disabled_does_not_populate(self):
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        bot._synth_cache.clear()
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"x")
+                await synthesize("キャッシュしない", VoiceSettings())
+            assert bot._synth_cache == {}
+        finally:
+            await close_http_session()
+            bot._synth_cache.clear()
+
+    async def test_concurrent_calls_dedupe_http(self):
+        """同一キーで同時に cache=True の合成が走ると、HTTPは1回だけになる"""
+        import asyncio
+
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        bot._synth_cache.clear()
+        bot._synth_in_flight.clear()
+        http_calls = 0
+
+        async def counting_synthesis(url, **kwargs):
+            nonlocal http_calls
+            http_calls += 1
+            # in-flight 間に両 coroutine が重なるように少し待つ
+            await asyncio.sleep(0.01)
+            import aiohttp
+
+            return aiohttp.web.Response(body=b"once")
+
+        try:
+            with aioresponses() as m:
+                # audio_query は普通に返し、synthesis はカウントしてから返す
+                m.post(re.compile(r".*audio_query.*"), payload={}, repeat=True)
+                m.post(
+                    re.compile(r".*synthesis.*"),
+                    callback=lambda url, **kw: None,
+                    body=b"once",
+                    repeat=True,
+                )
+                # 同じキーで2つ並行実行
+                r1, r2 = await asyncio.gather(
+                    synthesize("並行", VoiceSettings(), cache=True),
+                    synthesize("並行", VoiceSettings(), cache=True),
+                )
+                assert r1 == b"once"
+                assert r2 == b"once"
+                # synthesis 1回のみ（2つめは in-flight 待ち→キャッシュから返る）
+                synthesis_count = sum(1 for k in m.requests if "synthesis" in str(k))
+                assert synthesis_count == 1
+                audio_query_count = sum(
+                    1 for k in m.requests if "audio_query" in str(k)
+                )
+                assert audio_query_count == 1
+        finally:
+            await close_http_session()
+            bot._synth_cache.clear()
+            bot._synth_in_flight.clear()
+
+    async def test_in_flight_cleared_on_error(self):
+        """合成が失敗した時も in-flight エントリが残らない（次のリトライを妨げない）"""
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        bot._synth_cache.clear()
+        bot._synth_in_flight.clear()
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), status=500)
+                with pytest.raises(Exception):
+                    await synthesize("失敗", VoiceSettings(), cache=True)
+            assert bot._synth_in_flight == {}
+        finally:
+            await close_http_session()
+            bot._synth_cache.clear()
+            bot._synth_in_flight.clear()
+
+
+def _make_wav_bytes(channels=2, rate=48000, width=2, n_samples=480):
+    """テスト用 WAV バイト列生成。デフォルトは 48kHz stereo 16-bit 10ms"""
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        w.writeframes(b"\x00" * n_samples * channels * width)
+    return buf.getvalue()
+
+
+class TestMakeAudioSource:
+    """_make_audio_source: 48kHz stereo 16bit なら PCMAudio、それ以外は FFmpeg"""
+
+    def test_pcm_for_valid_48khz_stereo_wav(self):
+        import discord
+
+        from bot import _make_audio_source
+
+        wav = _make_wav_bytes(channels=2, rate=48000, width=2)
+        source = _make_audio_source(wav)
+        assert isinstance(source, discord.PCMAudio)
+
+    @patch("discord.FFmpegPCMAudio")
+    def test_ffmpeg_fallback_for_invalid_data(self, mock_ffmpeg):
+        from bot import _make_audio_source
+
+        _make_audio_source(b"not-a-wav")
+        mock_ffmpeg.assert_called_once()
+
+    @patch("discord.FFmpegPCMAudio")
+    def test_ffmpeg_fallback_for_mono(self, mock_ffmpeg):
+        from bot import _make_audio_source
+
+        wav = _make_wav_bytes(channels=1, rate=48000, width=2)
+        _make_audio_source(wav)
+        mock_ffmpeg.assert_called_once()
+
+    @patch("discord.FFmpegPCMAudio")
+    def test_ffmpeg_fallback_for_wrong_samplerate(self, mock_ffmpeg):
+        from bot import _make_audio_source
+
+        wav = _make_wav_bytes(channels=2, rate=24000, width=2)
+        _make_audio_source(wav)
+        mock_ffmpeg.assert_called_once()
+
+    @patch("discord.FFmpegPCMAudio")
+    def test_ffmpeg_fallback_for_wrong_sample_width(self, mock_ffmpeg):
+        from bot import _make_audio_source
+
+        wav = _make_wav_bytes(channels=2, rate=48000, width=1)  # 8bit
+        _make_audio_source(wav)
+        mock_ffmpeg.assert_called_once()
+
+    def test_pcm_padded_to_full_frame(self):
+        """末尾の半端フレームがゼロパディングされて全部再生されること"""
+        import discord
+
+        from bot import _make_audio_source
+
+        # 3840未満しかPCMが出ないサイズにする（48000Hz stereo 16bit = 3840B/20ms）
+        # n_samples=240 = 5ms → PCM 960B
+        wav = _make_wav_bytes(channels=2, rate=48000, width=2, n_samples=240)
+        source = _make_audio_source(wav)
+        assert isinstance(source, discord.PCMAudio)
+        # 読み出して 3840 バイトの1フレームが取れる（パディング済み）
+        first_frame = source.read()
+        assert len(first_frame) == 3840
+        # 次は空
+        assert source.read() == b""
+
+    def test_pcm_multi_frame_read(self):
+        """複数フレーム分のPCMを順次返すこと"""
+        import discord
+
+        from bot import _make_audio_source
+
+        # 2フレーム分ぴったり = 960 samples @ stereo
+        wav = _make_wav_bytes(channels=2, rate=48000, width=2, n_samples=1920)
+        source = _make_audio_source(wav)
+        assert isinstance(source, discord.PCMAudio)
+        f1 = source.read()
+        f2 = source.read()
+        assert len(f1) == 3840
+        assert len(f2) == 3840
+        assert source.read() == b""
+
+
+class TestSynthesizeOutputFormat:
+    """synthesize が Discord 互換フォーマット(48kHz stereo)をエンジンに要求するか"""
+
+    async def test_requests_48khz_stereo_in_query(self):
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        try:
+            with aioresponses() as m:
+                m.post(re.compile(r".*audio_query.*"), payload={})
+                m.post(re.compile(r".*synthesis.*"), body=b"x")
+                await synthesize("テスト", VoiceSettings())
+                # synthesis のリクエストボディを検証
+                synthesis_call = list(m.requests.values())[1][0]
+                body = synthesis_call.kwargs["json"]
+                assert body["outputSamplingRate"] == 48000
+                assert body["outputStereo"] is True
+        finally:
+            await close_http_session()
+
+
+class TestPlayNextUsesPcm:
+    async def test_valid_wav_uses_pcm_not_ffmpeg(self):
+        """完全な 48kHz stereo WAV が来たら FFmpeg を起動しない"""
+        from bot import play_locks, play_next, queues
+
+        wav = _make_wav_bytes(channels=2, rate=48000, width=2, n_samples=480)
+        mock_vc = MagicMock()
+        mock_vc.is_connected.return_value = True
+        mock_vc.is_playing.return_value = False
+        mock_vc.is_paused.return_value = False
+        queues[2001] = deque([wav])
+        try:
+            with patch("discord.FFmpegPCMAudio") as mock_ffmpeg:
+                await play_next(2001, mock_vc)
+                mock_ffmpeg.assert_not_called()
+            mock_vc.play.assert_called_once()
+        finally:
+            queues.pop(2001, None)
+            play_locks.pop(2001, None)

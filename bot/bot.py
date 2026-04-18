@@ -4,7 +4,8 @@ import logging
 import os
 import re
 import time
-from collections import deque
+import wave
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 
 import aiohttp
@@ -47,15 +48,45 @@ logger.info(f"DEFAULT_SPEAKER_ID: {DEFAULT_SPEAKER}")
 intents = discord.Intents.default()
 intents.message_content = True
 
-client = discord.Client(intents=intents)
+
+class TtsClient(discord.Client):
+    """discord.Client のサブクラス。終了時に共有 HTTP セッションも閉じる。"""
+
+    async def close(self) -> None:
+        await close_http_session()
+        await super().close()
+
+
+client = TtsClient(intents=intents)
 tree = app_commands.CommandTree(client)
 
 # ギルドごとの再生キューと読み上げ対象チャンネル
-queues: dict[int, deque] = {}
+queues: dict[int, deque[bytes]] = {}
 read_channels: dict[int, int] = {}  # guild_id -> channel_id
 play_locks: dict[int, asyncio.Lock] = {}  # guild_id -> 再生開始の競合防止ロック
 engine_error_notified_at: dict[int, float] = {}  # guild_id -> monotonic seconds
 ENGINE_ERROR_NOTIFY_INTERVAL = 30.0
+
+
+def _ensure_queue(guild_id: int) -> deque[bytes]:
+    """guild_id のキューを取得（無ければ作成）"""
+    return queues.setdefault(guild_id, deque())
+
+
+def _cleanup_guild_state(guild_id: int) -> None:
+    """ギルドごとの再生状態（キュー・読み上げch・ロック・通知タイムスタンプ）を破棄"""
+    queues.pop(guild_id, None)
+    read_channels.pop(guild_id, None)
+    play_locks.pop(guild_id, None)
+    engine_error_notified_at.pop(guild_id, None)
+
+
+async def _safe_disconnect(vc: discord.VoiceClient) -> None:
+    """VC切断。既に切断済みなどで例外が出ても無視する。"""
+    try:
+        await vc.disconnect()
+    except Exception as e:
+        logger.warning(f"切断でエラー: {e}")
 
 
 @dataclass
@@ -87,12 +118,45 @@ MAX_READ_LENGTH = 100
 db_pool: asyncpg.Pool | None = None
 db_init_lock = asyncio.Lock()
 
+# 共有 HTTP セッション（Keep-Alive で接続再利用）
+_http_session: aiohttp.ClientSession | None = None
+
+# apply_dict のコンパイル済みパターンキャッシュ（ギルド毎）
+_dict_patterns: dict[int, re.Pattern[str]] = {}
+
+# 合成結果の LRU キャッシュ（cache=True でのみ使用）
+_synth_cache: OrderedDict[tuple, bytes] = OrderedDict()
+_SYNTH_CACHE_MAX = 64
+# 同じキーで同時に合成が走らないよう in-flight 管理
+_synth_in_flight: dict[tuple, asyncio.Event] = {}
+
 
 def _require_db_pool() -> asyncpg.Pool:
     """db_pool が初期化されているか確認して返す"""
     if db_pool is None:
         raise RuntimeError("DB接続プールが未初期化です（on_ready完了前の可能性）")
     return db_pool
+
+
+async def get_http_session() -> aiohttp.ClientSession:
+    """共有 ClientSession を返す（未作成/クローズ済みなら新規作成）"""
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        _http_session = aiohttp.ClientSession()
+    return _http_session
+
+
+async def close_http_session():
+    """共有 ClientSession をクローズする"""
+    global _http_session
+    if _http_session is not None and not _http_session.closed:
+        await _http_session.close()
+    _http_session = None
+
+
+def _invalidate_dict_cache(guild_id: int):
+    """指定ギルドの apply_dict パターンキャッシュを破棄"""
+    _dict_patterns.pop(guild_id, None)
 
 
 # --- DB ---
@@ -232,6 +296,7 @@ async def load_guild_dicts():
     async with _require_db_pool().acquire() as conn:
         rows = await conn.fetch("SELECT guild_id, word, reading FROM guild_dicts")
     guild_dicts.clear()
+    _dict_patterns.clear()
     for row in rows:
         gid = row["guild_id"]
         if gid not in guild_dicts:
@@ -241,7 +306,11 @@ async def load_guild_dicts():
 
 
 async def add_dict_entry(guild_id: int, word: str, reading: str):
-    """辞書エントリを1件DBに保存"""
+    """辞書エントリをメモリ/DBに保存しパターンキャッシュを無効化する"""
+    # メモリ更新とキャッシュ無効化を await 前に行い、
+    # 他コルーチンから古いパターンで apply_dict される race を防ぐ
+    guild_dicts.setdefault(guild_id, {})[word] = reading
+    _invalidate_dict_cache(guild_id)
     async with _require_db_pool().acquire() as conn:
         await conn.execute(
             """
@@ -256,7 +325,13 @@ async def add_dict_entry(guild_id: int, word: str, reading: str):
 
 
 async def delete_dict_entry(guild_id: int, word: str):
-    """辞書エントリを1件DBから削除"""
+    """辞書エントリをメモリ/DBから削除しパターンキャッシュを無効化する"""
+    d = guild_dicts.get(guild_id)
+    if d is not None:
+        d.pop(word, None)
+        if not d:
+            guild_dicts.pop(guild_id, None)
+    _invalidate_dict_cache(guild_id)
     async with _require_db_pool().acquire() as conn:
         await conn.execute(
             "DELETE FROM guild_dicts WHERE guild_id = $1 AND word = $2",
@@ -270,9 +345,12 @@ def apply_dict(guild_id: int, text: str) -> str:
     d = guild_dicts.get(guild_id, {})
     if not d:
         return text
-    # 長い単語を優先してマッチさせる
-    words_sorted = sorted(d.keys(), key=len, reverse=True)
-    pattern = re.compile("|".join(re.escape(w) for w in words_sorted))
+    # コンパイル済みパターンをキャッシュ（長い単語を優先マッチ）
+    pattern = _dict_patterns.get(guild_id)
+    if pattern is None:
+        words_sorted = sorted(d.keys(), key=len, reverse=True)
+        pattern = re.compile("|".join(re.escape(w) for w in words_sorted))
+        _dict_patterns[guild_id] = pattern
     return pattern.sub(lambda m: d[m.group(0)], text)
 
 
@@ -332,6 +410,42 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+# Discord が要求する PCM フォーマット: 48kHz stereo s16le、20ms = 3840B/frame
+_DISCORD_SAMPLE_RATE = 48000
+_DISCORD_CHANNELS = 2
+_DISCORD_SAMPLE_WIDTH = 2  # 16-bit
+_DISCORD_FRAME_SIZE = (
+    _DISCORD_SAMPLE_RATE * 20 // 1000 * _DISCORD_CHANNELS * _DISCORD_SAMPLE_WIDTH
+)
+
+
+def _make_audio_source(audio_data: bytes) -> discord.AudioSource:
+    """音声バイト列から Discord の AudioSource を作成する。
+
+    Discord 互換フォーマット (48kHz/stereo/16bit) の WAV なら PCMAudio を返し、
+    ffmpeg のサブプロセス起動コストを省略する。想定と異なる場合は
+    FFmpegPCMAudio にフォールバックして互換性を保つ。
+    """
+    try:
+        with wave.open(io.BytesIO(audio_data), "rb") as w:
+            if (
+                w.getnchannels() == _DISCORD_CHANNELS
+                and w.getsampwidth() == _DISCORD_SAMPLE_WIDTH
+                and w.getframerate() == _DISCORD_SAMPLE_RATE
+            ):
+                pcm = w.readframes(w.getnframes())
+                # 末尾の半端フレームはゼロパディングして discord.PCMAudio が
+                # 取りこぼさないようにする
+                remainder = len(pcm) % _DISCORD_FRAME_SIZE
+                if remainder:
+                    pcm += b"\x00" * (_DISCORD_FRAME_SIZE - remainder)
+                return discord.PCMAudio(io.BytesIO(pcm))
+    except (wave.Error, EOFError, ValueError) as e:
+        logger.debug(f"PCM直接再生不可、FFmpegにフォールバック: {e}")
+
+    return discord.FFmpegPCMAudio(io.BytesIO(audio_data), pipe=True)
+
+
 # --- TTS エンジン ---
 
 
@@ -341,38 +455,38 @@ async def fetch_speakers():
     speaker_engine.clear()
     characters.clear()
 
-    async with aiohttp.ClientSession() as session:
-        for engine_name, engine_url, offset in ENGINES:
-            try:
-                async with session.get(f"{engine_url}/speakers") as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
+    session = await get_http_session()
+    for engine_name, engine_url, offset in ENGINES:
+        try:
+            async with session.get(f"{engine_url}/speakers") as resp:
+                resp.raise_for_status()
+                data = await resp.json()
 
-                count = 0
-                for speaker in data:
-                    char_name = speaker["name"]
-                    if len(ENGINES) > 1:
-                        char_key = f"[{engine_name}] {char_name}"
-                    else:
-                        char_key = char_name
-                    if char_key not in characters:
-                        characters[char_key] = []
-                    for style in speaker["styles"]:
-                        real_id = style["id"]
-                        global_id = real_id + offset
-                        style_name = style["name"]
-                        label = f"{char_key}（{style_name}）"
-                        speakers_cache[global_id] = label
-                        speaker_engine[global_id] = (
-                            engine_url,
-                            real_id,
-                        )
-                        characters[char_key].append((global_id, style_name))
-                        count += 1
+            count = 0
+            for speaker in data:
+                char_name = speaker["name"]
+                if len(ENGINES) > 1:
+                    char_key = f"[{engine_name}] {char_name}"
+                else:
+                    char_key = char_name
+                if char_key not in characters:
+                    characters[char_key] = []
+                for style in speaker["styles"]:
+                    real_id = style["id"]
+                    global_id = real_id + offset
+                    style_name = style["name"]
+                    label = f"{char_key}（{style_name}）"
+                    speakers_cache[global_id] = label
+                    speaker_engine[global_id] = (
+                        engine_url,
+                        real_id,
+                    )
+                    characters[char_key].append((global_id, style_name))
+                    count += 1
 
-                logger.info(f"スピーカー取得成功: {engine_name} ({count}件)")
-            except Exception as e:
-                logger.warning(f"スピーカー取得失敗: {engine_name}: {e}")
+            logger.info(f"スピーカー取得成功: {engine_name} ({count}件)")
+        except Exception as e:
+            logger.warning(f"スピーカー取得失敗: {engine_name}: {e}")
 
     logger.info(f"スピーカー一覧合計: {len(speakers_cache)}件")
 
@@ -386,25 +500,64 @@ def get_user_settings(guild_id: int, user_id: int) -> VoiceSettings:
     return user_settings.get((0, user_id), VoiceSettings())
 
 
-async def synthesize(text: str, settings: VoiceSettings) -> bytes:
-    """エンジンでテキストを音声合成してwavバイトを返す"""
+async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) -> bytes:
+    """エンジンでテキストを音声合成してwavバイトを返す。
+
+    cache=True の時のみ結果を LRU キャッシュする。挨拶や入退室通知など
+    繰り返し発声される定型文に対して指定する。
+    """
     if not ENGINES:
         raise RuntimeError("TTSエンジンが設定されていません")
 
     # speaker_id はオフセット加算後の global_id。
-    # キャッシュに無い場合、そのまま実IDとして投げるとオフセット分ずれた音声や
-    # 存在しないIDになるため、DEFAULT_SPEAKER にフォールバックする。
+    # キャッシュに無い場合、DEFAULT_SPEAKER の登録マッピングへフォールバックする。
+    # DEFAULT_SPEAKER も未登録なら fetch_speakers が未成功 → 不正な ID を投げると
+    # 別音声になりかねないため明示的に失敗させる。
     engine_info = speaker_engine.get(settings.speaker_id)
     if engine_info is None:
+        engine_info = speaker_engine.get(DEFAULT_SPEAKER)
+        if engine_info is None:
+            raise RuntimeError(
+                "スピーカー情報が未取得です。エンジン接続を確認してください"
+            )
         logger.warning(
             f"speaker_id {settings.speaker_id} がキャッシュに無いため "
             f"DEFAULT_SPEAKER({DEFAULT_SPEAKER}) を使用"
         )
-        engine_info = speaker_engine.get(
-            DEFAULT_SPEAKER, (ENGINES[0][1], DEFAULT_SPEAKER)
-        )
     engine_url, real_id = engine_info
-    async with aiohttp.ClientSession() as session:
+
+    cache_key = None
+    in_flight_event: asyncio.Event | None = None
+    if cache:
+        cache_key = (
+            engine_url,
+            real_id,
+            text,
+            settings.speed,
+            settings.pitch,
+            settings.intonation,
+            settings.volume,
+        )
+        # キャッシュ確認 → in-flight 待機 → 再度キャッシュ確認 の順で重複HTTPを防ぐ
+        cached = _synth_cache.get(cache_key)
+        if cached is not None:
+            _synth_cache.move_to_end(cache_key)
+            return cached
+
+        in_flight = _synth_in_flight.get(cache_key)
+        if in_flight is not None:
+            await in_flight.wait()
+            cached = _synth_cache.get(cache_key)
+            if cached is not None:
+                _synth_cache.move_to_end(cache_key)
+                return cached
+            # 先行タスクが失敗した → 自分で再合成する（以下のフローへ）
+
+        in_flight_event = asyncio.Event()
+        _synth_in_flight[cache_key] = in_flight_event
+
+    try:
+        session = await get_http_session()
         params = {"text": text, "speaker": real_id}
         async with session.post(f"{engine_url}/audio_query", params=params) as resp:
             resp.raise_for_status()
@@ -415,6 +568,10 @@ async def synthesize(text: str, settings: VoiceSettings) -> bytes:
         query["pitchScale"] = settings.pitch
         query["intonationScale"] = settings.intonation
         query["volumeScale"] = settings.volume
+        # Discord 互換フォーマットを直接要求 → ffmpeg 経由の変換を省略可能にする
+        # 未対応エンジンは無視するのでデフォルトフォーマットで返る（FFmpeg で再生）
+        query["outputSamplingRate"] = _DISCORD_SAMPLE_RATE
+        query["outputStereo"] = True
 
         async with session.post(
             f"{engine_url}/synthesis",
@@ -423,7 +580,18 @@ async def synthesize(text: str, settings: VoiceSettings) -> bytes:
             headers={"Content-Type": "application/json"},
         ) as resp:
             resp.raise_for_status()
-            return await resp.read()
+            data = await resp.read()
+
+        if cache_key is not None:
+            _synth_cache[cache_key] = data
+            while len(_synth_cache) > _SYNTH_CACHE_MAX:
+                _synth_cache.popitem(last=False)
+
+        return data
+    finally:
+        if cache_key is not None and in_flight_event is not None:
+            _synth_in_flight.pop(cache_key, None)
+            in_flight_event.set()
 
 
 async def play_next(guild_id: int, vc: discord.VoiceClient):
@@ -436,14 +604,12 @@ async def play_next(guild_id: int, vc: discord.VoiceClient):
         if vc.is_playing() or vc.is_paused():
             return
 
-        queue = queues.get(guild_id, deque())
+        queue = queues.get(guild_id)
         if not queue:
             return
 
         audio_data = queue.popleft()
-        audio_buffer = io.BytesIO(audio_data)
-
-        source = discord.FFmpegPCMAudio(audio_buffer, pipe=True)
+        source = _make_audio_source(audio_data)
 
         def after_play(error):
             if error:
@@ -511,9 +677,6 @@ class DictAddModal(ui.Modal, title="辞書に追加"):
             )
             return
 
-        if self.guild_id not in guild_dicts:
-            guild_dicts[self.guild_id] = {}
-        guild_dicts[self.guild_id][word] = reading
         await add_dict_entry(self.guild_id, word, reading)
 
         content, view = build_dict_message(self.guild_id)
@@ -536,9 +699,6 @@ class DictDeleteModal(ui.Modal, title="辞書から削除"):
             )
             return
 
-        del d[word]
-        if not d:
-            guild_dicts.pop(self.guild_id, None)
         await delete_dict_entry(self.guild_id, word)
 
         content, view = build_dict_message(self.guild_id)
@@ -593,8 +753,9 @@ async def join(interaction: discord.Interaction):
             await interaction.response.send_message("VCの人数制限に達しています")
             return
 
+    was_connected = interaction.guild.voice_client is not None
     try:
-        if interaction.guild.voice_client:
+        if was_connected:
             await interaction.guild.voice_client.move_to(channel)
         else:
             await channel.connect()
@@ -602,7 +763,12 @@ async def join(interaction: discord.Interaction):
         await interaction.response.send_message(f"VCへの接続に失敗しました: {e}")
         return
 
-    queues[interaction.guild.id] = deque()
+    if was_connected:
+        # move_to の場合: 既存キュー（未再生の音声）は保持
+        _ensure_queue(interaction.guild.id)
+    else:
+        # 新規接続: 切断クリーンアップ漏れ等で残存する古いキューを破棄
+        queues[interaction.guild.id] = deque()
     read_channels[interaction.guild.id] = interaction.channel_id
 
     embed = discord.Embed(
@@ -627,7 +793,7 @@ async def join(interaction: discord.Interaction):
     # 接続時に音声で挨拶
     try:
         settings = get_user_settings(interaction.guild.id, interaction.user.id)
-        audio_data = await synthesize("せつぞくしました", settings)
+        audio_data = await synthesize("せつぞくしました", settings, cache=True)
         vc = interaction.guild.voice_client
         if vc and vc.is_connected():
             queues[interaction.guild.id].append(audio_data)
@@ -644,17 +810,16 @@ async def on_voice_state_update(
     after: discord.VoiceState,
 ):
     if member.bot:
-        if client.user and member.id == client.user.id and after.channel is None:
-            guild_id = member.guild.id
-            queues.pop(guild_id, None)
-            read_channels.pop(guild_id, None)
-            play_locks.pop(guild_id, None)
-            engine_error_notified_at.pop(guild_id, None)
+        # 他の Bot のイベントは無視
+        if client.user is None or member.id != client.user.id:
             return
 
-        # Bot自身の再接続時、キューが残っていれば再生を再開する
-        if client.user and member.id == client.user.id and after.channel is not None:
-            guild_id = member.guild.id
+        guild_id = member.guild.id
+        if after.channel is None:
+            # Bot 自身の切断 → ギルド状態をクリーンアップ
+            _cleanup_guild_state(guild_id)
+        else:
+            # Bot 自身の再接続 → 残キューがあれば再生再開
             vc = member.guild.voice_client
             queue = queues.get(guild_id)
             if (
@@ -677,11 +842,8 @@ async def on_voice_state_update(
     # Bot以外のメンバーがいなくなったら自動切断
     members = [m for m in bot_channel.members if not m.bot]
     if not members:
-        await vc.disconnect()
-        queues.pop(guild_id, None)
-        read_channels.pop(guild_id, None)
-        play_locks.pop(guild_id, None)
-        engine_error_notified_at.pop(guild_id, None)
+        await _safe_disconnect(vc)
+        _cleanup_guild_state(guild_id)
         logger.info(f"全員退出のため自動切断 (Guild: {guild_id})")
         return
 
@@ -702,15 +864,13 @@ async def on_voice_state_update(
                 return
 
             settings = get_user_settings(member.guild.id, member.id)
-            audio_data = await synthesize(text, settings)
+            audio_data = await synthesize(text, settings, cache=True)
 
             vc = member.guild.voice_client
             if not vc or not vc.is_connected():
                 return
 
-            if guild_id not in queues:
-                queues[guild_id] = deque()
-            queues[guild_id].append(audio_data)
+            _ensure_queue(guild_id).append(audio_data)
 
             if not vc.is_playing() and not vc.is_paused():
                 await play_next(guild_id, vc)
@@ -724,11 +884,8 @@ async def on_voice_state_update(
 @tree.command(name="leave", description="ボイスチャンネルから切断")
 async def leave(interaction: discord.Interaction):
     if interaction.guild.voice_client:
-        await interaction.guild.voice_client.disconnect()
-        queues.pop(interaction.guild.id, None)
-        read_channels.pop(interaction.guild.id, None)
-        play_locks.pop(interaction.guild.id, None)
-        engine_error_notified_at.pop(interaction.guild.id, None)
+        await _safe_disconnect(interaction.guild.voice_client)
+        _cleanup_guild_state(interaction.guild.id)
         await interaction.response.send_message("切断しました")
     else:
         await interaction.response.send_message("ボイスチャンネルに接続していません")
@@ -737,11 +894,8 @@ async def leave(interaction: discord.Interaction):
 @tree.command(name="vc", description="VCに接続/切断をトグル")
 async def vc_toggle(interaction: discord.Interaction):
     if interaction.guild.voice_client:
-        await interaction.guild.voice_client.disconnect()
-        queues.pop(interaction.guild.id, None)
-        read_channels.pop(interaction.guild.id, None)
-        play_locks.pop(interaction.guild.id, None)
-        engine_error_notified_at.pop(interaction.guild.id, None)
+        await _safe_disconnect(interaction.guild.voice_client)
+        _cleanup_guild_state(interaction.guild.id)
         await interaction.response.send_message("切断しました")
     else:
         await join.callback(interaction)
@@ -1033,13 +1187,14 @@ async def on_message(message: discord.Message):
         return
 
     guild_id = message.guild.id
-    if guild_id not in queues:
-        queues[guild_id] = deque()
-
-    queues[guild_id].append(audio_data)
+    _ensure_queue(guild_id).append(audio_data)
 
     if not vc.is_playing() and not vc.is_paused():
         await play_next(guild_id, vc)
+
+
+# Discord ログイン時の 503 等のリトライ上限（指数バックオフ: 5, 10, 20, 40, 80 秒）
+MAX_LOGIN_RETRIES = 5
 
 
 if __name__ == "__main__":
@@ -1048,10 +1203,17 @@ if __name__ == "__main__":
     if not ENGINES:
         raise RuntimeError("VOICEVOX_URL など、少なくとも1つのTTSエンジンURLが必要です")
 
-    while True:
+    for attempt in range(MAX_LOGIN_RETRIES):
         try:
             client.run(DISCORD_TOKEN)
             break
         except discord.DiscordServerError as e:
-            logger.warning(f"Discord API一時障害のため再試行します: {e}")
-            time.sleep(5)
+            if attempt == MAX_LOGIN_RETRIES - 1:
+                logger.error(f"最大リトライ回数到達、諦めます: {e}")
+                raise
+            wait = 5 * (2**attempt)
+            logger.warning(
+                f"Discord API一時障害 ({attempt + 1}/{MAX_LOGIN_RETRIES}): {e}"
+                f" → {wait}秒待機して再試行"
+            )
+            time.sleep(wait)
