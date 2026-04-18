@@ -1571,7 +1571,7 @@ async def on_message(message: discord.Message):
 
     # 長すぎるメッセージは切り詰め
     if len(text) > MAX_READ_LENGTH:
-        text = text[:MAX_READ_LENGTH] + "、いかしょうりゃく"
+        text = text[:MAX_READ_LENGTH] + "、いかりゃく"
 
     guild_id = message.guild.id
 

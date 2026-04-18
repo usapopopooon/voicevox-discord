@@ -257,9 +257,9 @@ class TestOnMessage:
 
         long_text = "あ" * 150
         if len(long_text) > MAX_READ_LENGTH:
-            long_text = long_text[:MAX_READ_LENGTH] + "、いかしょうりゃく"
-        assert long_text.endswith("、いかしょうりゃく")
-        assert long_text == "あ" * 100 + "、いかしょうりゃく"
+            long_text = long_text[:MAX_READ_LENGTH] + "、いかりゃく"
+        assert long_text.endswith("、いかりゃく")
+        assert long_text == "あ" * 100 + "、いかりゃく"
 
 
 class TestEngines:
@@ -1472,10 +1472,10 @@ class TestOnMessageMore:
                 queues.pop(10007, None)
                 play_locks.pop(10007, None)
         assert captured_text
-        assert captured_text[0].endswith("、いかしょうりゃく")
+        assert captured_text[0].endswith("、いかりゃく")
         from bot import MAX_READ_LENGTH
 
-        assert len(captured_text[0]) == MAX_READ_LENGTH + len("、いかしょうりゃく")
+        assert len(captured_text[0]) == MAX_READ_LENGTH + len("、いかりゃく")
 
     async def test_preserves_order_under_concurrent_synth(self):
         """2メッセージ同時到着時、後続が先に合成完了しても queue 順序が維持される"""
