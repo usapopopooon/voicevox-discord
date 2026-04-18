@@ -40,3 +40,13 @@ def clear_recent_synth_cache(env_setup):
     bot._recent_synth_cache.clear()
     yield
     bot._recent_synth_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def clear_user_buckets(env_setup):
+    """ユーザ単位レートリミットのバケットをテスト間で独立させる。"""
+    import bot
+
+    bot._user_buckets.clear()
+    yield
+    bot._user_buckets.clear()

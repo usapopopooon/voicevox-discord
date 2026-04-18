@@ -17,12 +17,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ログ設定
+# ログ設定（本番では LOG_LEVEL=WARNING 等でログ量を絞ってストレージ課金を節約）
+_LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
+_LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_LOG_LEVEL,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+if _LOG_LEVEL_NAME not in logging._nameToLevel:
+    logger.warning(f"LOG_LEVEL='{_LOG_LEVEL_NAME}' は未知のため INFO にフォールバック")
 
 # 設定（環境変数で切り替え）
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
@@ -243,6 +247,31 @@ def _prune_candidate_fail_until() -> None:
     expired = [k for k, deadline in _candidate_fail_until.items() if deadline <= now]
     for k in expired:
         _candidate_fail_until.pop(k, None)
+
+
+# ユーザ単位レートリミット（トークンバケット）。TTS コスト爆発と abuse 対策。
+# CAPACITY=10, 30 秒で満タンに戻る → 1ユーザあたり瞬発 10 件 / 平均 0.33 件/秒 が上限。
+USER_RATE_LIMIT_CAPACITY = 10
+USER_RATE_LIMIT_REFILL_PER_SEC = USER_RATE_LIMIT_CAPACITY / 30.0
+# (guild_id, user_id) -> (残トークン, 最終更新時刻[monotonic])
+_user_buckets: dict[tuple[int, int], tuple[float, float]] = {}
+
+
+def _rate_limit_try_consume(guild_id: int, user_id: int) -> bool:
+    """レートリミットでトークンを 1 つ消費。失敗時は False（= 合成スキップ）。"""
+    key = (guild_id, user_id)
+    now = time.monotonic()
+    tokens, last_refill = _user_buckets.get(key, (float(USER_RATE_LIMIT_CAPACITY), now))
+    elapsed = now - last_refill
+    tokens = min(
+        float(USER_RATE_LIMIT_CAPACITY),
+        tokens + elapsed * USER_RATE_LIMIT_REFILL_PER_SEC,
+    )
+    if tokens < 1.0:
+        _user_buckets[key] = (tokens, now)
+        return False
+    _user_buckets[key] = (tokens - 1.0, now)
+    return True
 
 
 # speaker_engine 空時の再取得を間引く
@@ -1051,6 +1080,10 @@ async def on_guild_remove(guild: discord.Guild):
     stale_keys = [k for k in user_settings if k[0] == guild_id]
     for k in stale_keys:
         user_settings.pop(k, None)
+    # レートリミットのユーザバケットも同様に解放
+    stale_buckets = [k for k in _user_buckets if k[0] == guild_id]
+    for k in stale_buckets:
+        _user_buckets.pop(k, None)
     logger.info(f"ギルド退出によりメモリ状態を解放 (Guild: {guild_id})")
 
 
@@ -1541,6 +1574,16 @@ async def on_message(message: discord.Message):
         text = text[:MAX_READ_LENGTH] + "、いかしょうりゃく"
 
     guild_id = message.guild.id
+
+    # キューが満杯なら合成してもドロップされるだけ。TTS コスト無駄なのでスキップ。
+    existing_queue = queues.get(guild_id)
+    if existing_queue is not None and len(existing_queue) >= QUEUE_MAXLEN:
+        return
+
+    # ユーザ単位レートリミットで abuse コストを頭打ちにする
+    if not _rate_limit_try_consume(guild_id, message.author.id):
+        return
+
     # 合成→queue追加をロックで包んで到着順に並べる（並行タスクによる逆転防止）
     try:
         async with _synth_order_lock(guild_id):

@@ -1511,6 +1511,116 @@ class TestOnMessageMore:
             queues.pop(10008, None)
             play_locks.pop(10008, None)
 
+    async def test_skips_synth_when_queue_full(self):
+        """キューが maxlen に達していたら合成呼び出しをスキップする（TTSコスト節約）"""
+        from bot import QUEUE_MAXLEN, on_message, queues, read_channels
+
+        guild_id = 12009
+        read_channels[guild_id] = 888
+        q = deque(maxlen=QUEUE_MAXLEN)
+        for _ in range(QUEUE_MAXLEN):
+            q.append(b"stale")
+        queues[guild_id] = q
+
+        synth_calls = 0
+
+        async def fake_synth(text, settings):
+            nonlocal synth_calls
+            synth_calls += 1
+            return b"x"
+
+        msg = _make_message(guild_id=guild_id, channel_id=888, content="new")
+        msg.guild.voice_client.is_connected.return_value = True
+        msg.guild.voice_client.is_playing.return_value = True
+
+        try:
+            with patch("bot.synthesize", side_effect=fake_synth):
+                await on_message(msg)
+            assert synth_calls == 0
+            assert len(queues[guild_id]) == QUEUE_MAXLEN
+            assert queues[guild_id][-1] == b"stale"
+        finally:
+            queues.pop(guild_id, None)
+            read_channels.pop(guild_id, None)
+
+    async def test_user_rate_limit_blocks_burst(self):
+        """1ユーザからの大量連投は USER_RATE_LIMIT_CAPACITY で頭打ち"""
+        import bot
+        from bot import USER_RATE_LIMIT_CAPACITY, on_message, queues, read_channels
+
+        guild_id = 12010
+        user_id = 4200
+        read_channels[guild_id] = 888
+        bot._user_buckets.clear()
+
+        synth_calls = 0
+
+        async def fake_synth(text, settings):
+            nonlocal synth_calls
+            synth_calls += 1
+            return f"ok{synth_calls}".encode()
+
+        try:
+            with patch("bot.synthesize", side_effect=fake_synth):
+                for i in range(USER_RATE_LIMIT_CAPACITY + 5):
+                    msg = _make_message(
+                        guild_id=guild_id,
+                        channel_id=888,
+                        user_id=user_id,
+                        content=f"m{i}",
+                    )
+                    msg.guild.voice_client.is_connected.return_value = True
+                    msg.guild.voice_client.is_playing.return_value = True
+                    await on_message(msg)
+            # 初期 CAPACITY 件のみ合成されその後は拒否
+            assert synth_calls == USER_RATE_LIMIT_CAPACITY
+        finally:
+            queues.pop(guild_id, None)
+            read_channels.pop(guild_id, None)
+            bot._user_buckets.clear()
+
+    async def test_user_rate_limit_independent_between_users(self):
+        """レートリミットはユーザ毎に独立"""
+        import bot
+        from bot import USER_RATE_LIMIT_CAPACITY, on_message, queues, read_channels
+
+        guild_id = 12011
+        read_channels[guild_id] = 888
+        bot._user_buckets.clear()
+
+        synth_calls = 0
+
+        async def fake_synth(text, settings):
+            nonlocal synth_calls
+            synth_calls += 1
+            return b"x"
+
+        try:
+            with patch("bot.synthesize", side_effect=fake_synth):
+                # ユーザ 1 を上限まで使い切る
+                for i in range(USER_RATE_LIMIT_CAPACITY):
+                    msg = _make_message(
+                        guild_id=guild_id,
+                        channel_id=888,
+                        user_id=1,
+                        content=f"a{i}",
+                    )
+                    msg.guild.voice_client.is_connected.return_value = True
+                    msg.guild.voice_client.is_playing.return_value = True
+                    await on_message(msg)
+                # ユーザ 2 は独立なので通る
+                msg_b = _make_message(
+                    guild_id=guild_id, channel_id=888, user_id=2, content="b"
+                )
+                msg_b.guild.voice_client.is_connected.return_value = True
+                msg_b.guild.voice_client.is_playing.return_value = True
+                await on_message(msg_b)
+            assert synth_calls == USER_RATE_LIMIT_CAPACITY + 1
+        finally:
+            queues.pop(guild_id, None)
+            read_channels.pop(guild_id, None)
+            bot._user_buckets.clear()
+
 
 class TestOnVoiceStateUpdate:
     async def test_ignores_other_bot_when_no_vc(self):
