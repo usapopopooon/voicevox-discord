@@ -1,4 +1,5 @@
 import asyncio
+import heapq
 import io
 import logging
 import os
@@ -596,7 +597,7 @@ async def _build_synthesis_candidates(
 
     if speaker_engine:
         # マッピングに存在する候補を追加（先頭3件まで）
-        for global_id in sorted(speaker_engine.keys())[:3]:
+        for global_id in heapq.nsmallest(3, speaker_engine.keys()):
             engine_url, real_id = speaker_engine[global_id]
             _append_synthesis_candidate(
                 candidates,

@@ -624,6 +624,103 @@ class TestSynthesizeFallback:
             bot.speaker_engine.pop(99999, None)
             bot.speaker_engine.pop(3, None)
 
+    async def test_cached_fallback_prefers_smallest_global_ids(self):
+        import bot
+
+        original = dict(bot.speaker_engine)
+        try:
+            bot.speaker_engine.clear()
+            bot.speaker_engine[100] = ("http://e1", 100)
+            bot.speaker_engine[2] = ("http://e2", 2)
+            bot.speaker_engine[50] = ("http://e3", 50)
+            bot.speaker_engine[1] = ("http://e4", 1)
+
+            candidates = await bot._build_synthesis_candidates(
+                requested_speaker_id=9999
+            )
+            # requested/default が無いとき、
+            # cached_speaker_fallback は global_id の小さい順
+            cached = [c for c in candidates if c[2] == "cached_speaker_fallback"]
+            assert [real_id for _, real_id, _ in cached] == [1, 2, 50]
+        finally:
+            bot.speaker_engine.clear()
+            bot.speaker_engine.update(original)
+
+    async def test_priority_order_requested_default_cached_raw(self, monkeypatch):
+        import bot
+
+        original_engine = list(bot.ENGINES)
+        original_map = dict(bot.speaker_engine)
+        try:
+            monkeypatch.setattr(
+                "bot.ENGINES",
+                [
+                    ("VOICEVOX", "http://raw-a:50021", 0),
+                    ("COEIROINK", "http://raw-b:50031", 10000),
+                ],
+            )
+            bot.speaker_engine.clear()
+            bot.speaker_engine[999] = ("http://requested:50021", 99)
+            bot.speaker_engine[3] = ("http://default:50021", 3)
+            bot.speaker_engine[10] = ("http://cached-a:50021", 10)
+            bot.speaker_engine[11] = ("http://cached-b:50021", 11)
+            bot.speaker_engine[12] = ("http://cached-c:50021", 12)
+
+            candidates = await bot._build_synthesis_candidates(999)
+            reasons = [r for _, _, r in candidates]
+
+            assert reasons[0] == "requested_speaker"
+            assert "default_speaker_mapping" in reasons
+            assert reasons.count("cached_speaker_fallback") >= 1
+            assert reasons[-2:] == ["raw_default_id", "raw_default_id"]
+        finally:
+            monkeypatch.setattr("bot.ENGINES", original_engine)
+            bot.speaker_engine.clear()
+            bot.speaker_engine.update(original_map)
+
+    async def test_deduplicates_same_engine_and_speaker(self, monkeypatch):
+        import bot
+
+        original_engine = list(bot.ENGINES)
+        original_map = dict(bot.speaker_engine)
+        try:
+            monkeypatch.setattr(
+                "bot.ENGINES",
+                [
+                    ("VOICEVOX", "http://dup:50021", 0),
+                    ("COEIROINK", "http://other:50031", 10000),
+                ],
+            )
+            bot.speaker_engine.clear()
+            # requested/default/cached が同一 (engine, speaker) を指すケース
+            bot.speaker_engine[42] = ("http://dup:50021", 3)
+            bot.speaker_engine[3] = ("http://dup:50021", 3)
+            bot.speaker_engine[1] = ("http://dup:50021", 3)
+
+            candidates = await bot._build_synthesis_candidates(42)
+            dedup_count = sum(
+                1
+                for engine_url, real_id, _ in candidates
+                if (engine_url, real_id) == ("http://dup:50021", 3)
+            )
+            assert dedup_count == 1
+        finally:
+            monkeypatch.setattr("bot.ENGINES", original_engine)
+            bot.speaker_engine.clear()
+            bot.speaker_engine.update(original_map)
+
+    async def test_refresh_is_throttled_by_interval(self):
+        import bot
+
+        original_last_attempt = bot._last_speaker_refresh_attempt
+        try:
+            bot._last_speaker_refresh_attempt = bot.time.monotonic()
+            with patch("bot.fetch_speakers", new=AsyncMock()) as mocked_fetch:
+                await bot._refresh_speakers_if_needed()
+                mocked_fetch.assert_not_awaited()
+        finally:
+            bot._last_speaker_refresh_attempt = original_last_attempt
+
 
 class TestDbOperations:
     async def test_save_user_setting_executes(self, mock_db_pool):
@@ -1493,6 +1590,121 @@ class TestOnVoiceStateUpdate:
             read_channels.pop(5005, None)
             play_locks.pop(5005, None)
             engine_error_notified_at.pop(5005, None)
+
+    async def test_bot_reconnect_resumes_when_queue_exists(self):
+        from bot import client, on_voice_state_update, queues
+
+        original_user = client._connection.user
+        client._connection.user = MagicMock(id=4242)
+
+        member = MagicMock()
+        member.bot = True
+        member.id = 4242
+        member.guild.id = 5011
+        vc = member.guild.voice_client
+        vc.is_connected.return_value = True
+        vc.is_playing.return_value = False
+        vc.is_paused.return_value = False
+
+        before = MagicMock()
+        before.channel = None
+        after = MagicMock()
+        after.channel = MagicMock()
+
+        queues[5011] = deque([b"remain"])
+        try:
+            with patch("bot.play_next", new=AsyncMock()) as mocked_play_next:
+                await on_voice_state_update(member, before, after)
+                mocked_play_next.assert_awaited_once_with(5011, vc)
+        finally:
+            client._connection.user = original_user
+            queues.pop(5011, None)
+
+    async def test_bot_reconnect_does_not_resume_when_queue_empty(self):
+        from bot import client, on_voice_state_update, queues
+
+        original_user = client._connection.user
+        client._connection.user = MagicMock(id=4242)
+
+        member = MagicMock()
+        member.bot = True
+        member.id = 4242
+        member.guild.id = 5012
+        vc = member.guild.voice_client
+        vc.is_connected.return_value = True
+        vc.is_playing.return_value = False
+        vc.is_paused.return_value = False
+
+        before = MagicMock()
+        before.channel = None
+        after = MagicMock()
+        after.channel = MagicMock()
+
+        queues[5012] = deque()
+        try:
+            with patch("bot.play_next", new=AsyncMock()) as mocked_play_next:
+                await on_voice_state_update(member, before, after)
+                mocked_play_next.assert_not_awaited()
+        finally:
+            client._connection.user = original_user
+            queues.pop(5012, None)
+
+    async def test_join_event_skips_enqueue_when_disconnected_after_synthesize(self):
+        from bot import on_voice_state_update, queues
+
+        member = MagicMock()
+        member.bot = False
+        member.guild.id = 5013
+        member.id = 777
+        member.display_name = "RaceUser"
+        vc = member.guild.voice_client
+        # 1回目: 関数冒頭チェック、2回目: 合成前チェック、3回目: 合成後チェック
+        vc.is_connected.side_effect = [True, True, False]
+        human = MagicMock()
+        human.bot = False
+        vc.channel.members = [member, human]
+
+        before = MagicMock()
+        before.channel = None
+        after = MagicMock()
+        after.channel = vc.channel
+
+        with patch("bot.synthesize", new=AsyncMock(return_value=b"wav")) as mocked_syn:
+            await on_voice_state_update(member, before, after)
+            mocked_syn.assert_awaited_once()
+            assert 5013 not in queues
+
+    async def test_join_event_enqueues_but_not_play_when_vc_busy(self):
+        from bot import on_voice_state_update, play_locks, queues
+
+        member = MagicMock()
+        member.bot = False
+        member.guild.id = 5014
+        member.id = 778
+        member.display_name = "BusyUser"
+        vc = member.guild.voice_client
+        vc.is_connected.return_value = True
+        vc.is_playing.return_value = True
+        vc.is_paused.return_value = False
+        human = MagicMock()
+        human.bot = False
+        vc.channel.members = [member, human]
+
+        before = MagicMock()
+        before.channel = None
+        after = MagicMock()
+        after.channel = vc.channel
+
+        with patch("bot.synthesize", new=AsyncMock(return_value=b"wav")):
+            try:
+                with patch("bot.play_next", new=AsyncMock()) as mocked_play_next:
+                    await on_voice_state_update(member, before, after)
+                    assert 5014 in queues
+                    assert len(queues[5014]) == 1
+                    mocked_play_next.assert_not_awaited()
+            finally:
+                queues.pop(5014, None)
+                play_locks.pop(5014, None)
 
 
 class TestJoinCommand:
