@@ -5,13 +5,14 @@ Discord のテキストチャンネルのメッセージを VOICEVOX の音声�
 ## 機能
 
 - テキストチャンネルのメッセージを自動読み上げ
-- ユーザーごとにキャラクター・話速・音高・抑揚・音量を設定可能
+- ギルドごとに独立したユーザー音声設定（キャラクター・話速・音高・抑揚・音量）
 - ギルドごとの読み上げ辞書（単語→読みの置換）
 - ユーザーのミュート機能
 - VC の入退室通知
 - 全員退出時の自動切断
 - URL・メールアドレスの自動省略
 - 複数エンジン対応（VOICEVOX / COEIROINK / SHAREVOX）
+- Bot 再接続時の読み上げ再開、TTS障害通知のレート制限
 
 ## コマンド一覧
 
@@ -55,6 +56,13 @@ docker compose up
 - PostgreSQL + asyncpg
 - Docker Compose (ローカル) / Railway (本番)
 - GitHub Actions (ruff + pytest)
+
+## 実装上のポイント
+
+- 共有 `aiohttp.ClientSession` による HTTP 接続再利用
+- 入退室通知など定型文の音声合成 LRU キャッシュ
+- Discord 互換 WAV は `PCMAudio` で直接再生（非対応時のみ FFmpeg フォールバック）
+- ギルド単位キュー + 再生ロックで多重再生競合を防止
 
 詳細は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照してください。
 

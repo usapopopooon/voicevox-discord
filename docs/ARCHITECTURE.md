@@ -3,7 +3,7 @@
 ## 概要
 
 Discord のテキストチャンネルに投稿されたメッセージを、VOICEVOX の音声でボイスチャンネルに読み上げる Bot。
-ユーザーごとにキャラクターや音声パラメータを設定でき、ギルドごとに読み上げ辞書を管理できる。
+ギルドごとに独立したユーザー音声設定・辞書・ミュートを管理する。
 
 ## システム構成
 
@@ -62,7 +62,7 @@ voicevox-discord/
 | 項目 | 技術 |
 |---|---|
 | 言語 | Python 3.12 |
-| Discord ライブラリ | discord.py 2.6.4 (voice extras) |
+| Discord ライブラリ | discord.py 2.7+ (voice extras) |
 | コマンド体系 | スラッシュコマンド (`app_commands`) |
 | 音声合成 | VOICEVOX Engine (CPU版, Docker) |
 | HTTP クライアント | aiohttp |
@@ -91,14 +91,16 @@ voicevox-discord/
 ### DB スキーマ
 
 ```sql
--- ユーザーごとの音声設定
+-- ギルドごとのユーザー音声設定
 CREATE TABLE user_settings (
-    user_id BIGINT PRIMARY KEY,
+    guild_id BIGINT NOT NULL DEFAULT 0,
+    user_id BIGINT NOT NULL,
     speaker_id INTEGER NOT NULL DEFAULT 3,
     speed REAL NOT NULL DEFAULT 1.0,
     pitch REAL NOT NULL DEFAULT 0.0,
     intonation REAL NOT NULL DEFAULT 1.0,
-    volume REAL NOT NULL DEFAULT 1.0
+    volume REAL NOT NULL DEFAULT 1.0,
+    PRIMARY KEY (guild_id, user_id)
 );
 
 -- ギルドごとの読み上げ辞書
@@ -108,13 +110,21 @@ CREATE TABLE guild_dicts (
     reading TEXT NOT NULL,
     PRIMARY KEY (guild_id, word)
 );
+
+-- ギルドごとのミュート設定
+CREATE TABLE guild_mutes (
+    guild_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
 ```
 
 ### キャッシュ戦略
 
 - 起動時に DB から全件ロードしてメモリキャッシュ
-- 読み取りはメモリから（レイテンシ回避）
-- 書き込みはメモリ更新 + DB に UPSERT/DELETE
+- `apply_dict` はギルドごとにコンパイル済み正規表現を保持（辞書更新時に無効化）
+- 定型文合成は LRU キャッシュ（in-flight 制御で同時重複合成を抑止）
+- HTTP は共有 `aiohttp.ClientSession` で Keep-Alive 再利用
 
 ## 音声合成フロー
 
@@ -129,10 +139,23 @@ POST /audio_query?text=...&speaker=ID → 読み上げパラメータ取得
   ↓
 ユーザーの音声設定を適用 (speed, pitch, intonation, volume)
   ↓
+outputSamplingRate=48000 / outputStereo=true を指定
+  ↓
 POST /synthesis?speaker=ID (JSON body) → WAV バイナリ取得
   ↓
-FFmpegPCMAudio で PCM 変換 → ボイスチャンネルで再生
+Discord互換WAVなら PCMAudio で直接再生
+（非互換時は FFmpegPCMAudio にフォールバック）
+  ↓
+ボイスチャンネルで再生
 ```
+
+## 安定性対策
+
+- ギルドごとに再生ロックを持ち、`play_next` の多重起動を防止
+- Bot自身の VC 切断イベントで状態（キュー/ロック/通知時刻）をクリーンアップ
+- Bot再接続時にキューが残っていれば再生を自動再開
+- TTS接続エラー通知はギルド単位でレート制限
+- Discord API 503 などログイン失敗時は指数バックオフで再試行
 
 ## 環境変数
 
