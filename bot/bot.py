@@ -155,6 +155,10 @@ _synth_cache: OrderedDict[tuple, bytes] = OrderedDict()
 _SYNTH_CACHE_MAX = 64
 # 同じキーで同時に合成が走らないよう in-flight 管理
 _synth_in_flight: dict[tuple, asyncio.Event] = {}
+# speaker_engine 空時の再取得を間引く
+_speaker_refresh_lock = asyncio.Lock()
+_last_speaker_refresh_attempt = 0.0
+SPEAKER_REFRESH_INTERVAL = 30.0
 
 
 def _require_db_pool() -> asyncpg.Pool:
@@ -252,8 +256,9 @@ async def init_db():
                     """
                 )
                 if pk_name:
+                    escaped_pk_name = pk_name.replace('"', '""')
                     await conn.execute(
-                        f'ALTER TABLE user_settings DROP CONSTRAINT "{pk_name}"'
+                        f'ALTER TABLE user_settings DROP CONSTRAINT "{escaped_pk_name}"'
                     )
                 await conn.execute(
                     "ALTER TABLE user_settings ADD PRIMARY KEY (guild_id, user_id)"
@@ -517,6 +522,22 @@ async def fetch_speakers():
     logger.info(f"スピーカー一覧合計: {len(speakers_cache)}件")
 
 
+async def _refresh_speakers_if_needed() -> None:
+    """speaker_engine が空のときにスピーカー一覧を再取得する（短時間の連打を抑制）。"""
+    global _last_speaker_refresh_attempt
+
+    now = time.monotonic()
+    if now - _last_speaker_refresh_attempt < SPEAKER_REFRESH_INTERVAL:
+        return
+
+    async with _speaker_refresh_lock:
+        now = time.monotonic()
+        if now - _last_speaker_refresh_attempt < SPEAKER_REFRESH_INTERVAL:
+            return
+        _last_speaker_refresh_attempt = now
+        await fetch_speakers()
+
+
 def get_user_settings(guild_id: int, user_id: int) -> VoiceSettings:
     """ユーザーの音声設定を返す"""
     settings = user_settings.get((guild_id, user_id))
@@ -541,7 +562,12 @@ async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) ->
     # 別音声になりかねないため明示的に失敗させる。
     engine_info = speaker_engine.get(settings.speaker_id)
     if engine_info is None:
-        engine_info = speaker_engine.get(DEFAULT_SPEAKER)
+        if not speaker_engine:
+            await _refresh_speakers_if_needed()
+            engine_info = speaker_engine.get(settings.speaker_id)
+
+        if engine_info is None:
+            engine_info = speaker_engine.get(DEFAULT_SPEAKER)
         if engine_info is None:
             raise RuntimeError(
                 "スピーカー情報が未取得です。エンジン接続を確認してください"
@@ -654,6 +680,7 @@ async def play_next(guild_id: int, vc: discord.VoiceClient):
             vc.play(source, after=after_play)
         except discord.ClientException as e:
             logger.warning(f"再生スキップ（接続切断済み）: {e}")
+            queue.appendleft(audio_data)
 
 
 # --- 辞書UI ---

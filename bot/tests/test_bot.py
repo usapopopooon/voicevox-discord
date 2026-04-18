@@ -441,6 +441,8 @@ class TestPlayNextAdditional:
         queues[1004] = deque([b"audio"])
         # 例外が外に漏れないこと
         await play_next(1004, mock_vc)
+        # 再生開始できなかった音声は失われずキュー先頭へ戻る
+        assert list(queues[1004]) == [b"audio"]
         queues.pop(1004, None)
         play_locks.pop(1004, None)
 
@@ -568,6 +570,31 @@ class TestSynthesizeFallback:
         finally:
             bot.speaker_engine.pop(10003, None)
 
+    async def test_refreshes_speakers_when_cache_empty(self):
+        import bot
+        from bot import VoiceSettings, synthesize
+
+        async def _fake_fetch_speakers():
+            bot.speaker_engine[3] = ("http://test-voicevox:50021", 3)
+
+        original_last_attempt = bot._last_speaker_refresh_attempt
+        bot._last_speaker_refresh_attempt = 0.0
+        bot.speaker_engine.clear()
+        try:
+            with patch(
+                "bot.fetch_speakers",
+                new=AsyncMock(side_effect=_fake_fetch_speakers),
+            ) as mocked_fetch:
+                with aioresponses() as m:
+                    m.post(re.compile(r".*audio_query.*"), payload={})
+                    m.post(re.compile(r".*synthesis.*"), body=b"recovered-data")
+                    result = await synthesize("テスト", VoiceSettings(speaker_id=99999))
+                    assert result == b"recovered-data"
+                    mocked_fetch.assert_awaited_once()
+        finally:
+            bot.speaker_engine.pop(3, None)
+            bot._last_speaker_refresh_attempt = original_last_attempt
+
 
 class TestDbOperations:
     async def test_save_user_setting_executes(self, mock_db_pool):
@@ -690,6 +717,39 @@ class TestDbOperations:
             conn.execute.assert_awaited_once()
         finally:
             bot.guild_mutes.pop(62, None)
+
+
+class TestInitDbMigration:
+    async def test_drop_constraint_name_is_escaped(self, monkeypatch):
+        import bot
+
+        conn = MagicMock()
+        conn.execute = AsyncMock()
+        # 現在PKが guild_id,user_id ではない想定にする
+        conn.fetch = AsyncMock(return_value=[{"column_name": "user_id"}])
+        # ダブルクォートを含む制約名
+        conn.fetchval = AsyncMock(return_value='pk"name')
+
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=conn)
+        cm.__aexit__ = AsyncMock(return_value=None)
+
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=cm)
+
+        monkeypatch.setattr("bot.asyncpg.create_pool", AsyncMock(return_value=pool))
+
+        original_pool = bot.db_pool
+        bot.db_pool = None
+        try:
+            await bot.init_db()
+            sql_calls = [c.args[0] for c in conn.execute.await_args_list]
+            assert any(
+                'ALTER TABLE user_settings DROP CONSTRAINT "pk""name"' in sql
+                for sql in sql_calls
+            )
+        finally:
+            bot.db_pool = original_pool
 
 
 class TestCleanTextEdge:
