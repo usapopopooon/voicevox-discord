@@ -163,6 +163,41 @@ class TestApplyDict:
         assert result == "hello"
 
 
+class TestReadingCorrections:
+    """誤読されやすい漢字の built-in 読み補正"""
+
+    def test_replaces_common_misread_kanji(self):
+        from bot import apply_reading_corrections
+
+        assert apply_reading_corrections("雰囲気がいい") == "ふんいきがいい"
+        assert apply_reading_corrections("他人事だと思うな") == "ひとごとだと思うな"
+
+    def test_date_longest_match_wins(self):
+        """一昨昨日 が 一昨日 より先にマッチする"""
+        from bot import apply_reading_corrections
+
+        assert apply_reading_corrections("一昨昨日の話") == "さきおとといの話"
+        assert apply_reading_corrections("一昨日の話") == "おとといの話"
+        assert apply_reading_corrections("明後日来る") == "あさって来る"
+
+    def test_no_match_returns_original(self):
+        from bot import apply_reading_corrections
+
+        assert apply_reading_corrections("今日はいい日") == "今日はいい日"
+
+    def test_user_dict_overrides_built_in_in_on_message_flow(self):
+        """ユーザの /dict 登録が built-in 読みより優先される（on_message と同じ順序）"""
+        from bot import apply_dict, apply_reading_corrections, guild_dicts
+
+        guild_dicts[12345] = {"雰囲気": "ふいんき"}
+        try:
+            text = apply_dict(12345, "雰囲気がよい")
+            text = apply_reading_corrections(text)
+            assert text == "ふいんきがよい"
+        finally:
+            guild_dicts.pop(12345, None)
+
+
 class TestCleanText:
     def test_removes_urls(self):
         from bot import clean_text

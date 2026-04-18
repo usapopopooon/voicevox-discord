@@ -462,6 +462,90 @@ def _normalize_emoji_modifiers(text: str) -> str:
     return _EMOJI_SKIN_TONE_MODIFIER_PATTERN.sub("", text)
 
 
+# 誤読されやすい漢字の built-in 読み補正。
+# `/dict` でユーザが登録すると一覧が長くなるので、一般的なものは Bot 側で対応する。
+# on_message では apply_dict（ユーザ辞書）の後に適用し、ユーザ辞書で上書き可能にする。
+_READING_CORRECTIONS: dict[str, str] = {
+    # 日付（長いものを先にマッチ）
+    "一昨昨日": "さきおととい",
+    "一昨々日": "さきおととい",
+    "一昨日": "おととい",
+    "一昨年": "おととし",
+    "明々後日": "しあさって",
+    "明明後日": "しあさって",
+    "明後日": "あさって",
+    # 難読・誤読されやすい熟語
+    "雰囲気": "ふんいき",
+    "早急": "さっきゅう",
+    "凡例": "はんれい",
+    "重複": "ちょうふく",
+    "貼付": "ちょうふ",
+    "出納": "すいとう",
+    "代替": "だいたい",
+    "他人事": "ひとごと",
+    "言質": "げんち",
+    "相殺": "そうさい",
+    "所謂": "いわゆる",
+    "間髪": "かんはつ",
+    "漸次": "ぜんじ",
+    "紛糾": "ふんきゅう",
+    "固執": "こしつ",
+    "立役者": "たてやくしゃ",
+    "一期一会": "いちごいちえ",
+    # 慣用・古風な読み
+    "老若男女": "ろうにゃくなんにょ",
+    "面影": "おもかげ",
+    "生憎": "あいにく",
+    "欠伸": "あくび",
+    "強面": "こわもて",
+    "悪寒": "おかん",
+    "玄人": "くろうと",
+    "素人": "しろうと",
+    "足袋": "たび",
+    "五月雨": "さみだれ",
+    "時雨": "しぐれ",
+    "河岸": "かし",
+    "木陰": "こかげ",
+    "暖簾": "のれん",
+    "行方": "ゆくえ",
+    "日和": "ひより",
+    "果物": "くだもの",
+    "眼鏡": "めがね",
+    "土産": "みやげ",
+    "浴衣": "ゆかた",
+    "梅雨": "つゆ",
+    "従兄弟": "いとこ",
+    "従姉妹": "いとこ",
+    "叔父": "おじ",
+    "叔母": "おば",
+    "伯父": "おじ",
+    "伯母": "おば",
+    "田舎": "いなか",
+    "台詞": "せりふ",
+    "素敵": "すてき",
+    "部屋": "へや",
+    "雪崩": "なだれ",
+}
+
+
+_READING_PATTERN: re.Pattern[str] | None = (
+    re.compile(
+        "|".join(
+            re.escape(k) for k in sorted(_READING_CORRECTIONS, key=len, reverse=True)
+        )
+    )
+    if _READING_CORRECTIONS
+    else None
+)
+
+
+def apply_reading_corrections(text: str) -> str:
+    """誤読されやすい漢字を読み仮名に置換する（長一致優先）。"""
+    if _READING_PATTERN is None:
+        return text
+    return _READING_PATTERN.sub(lambda m: _READING_CORRECTIONS[m.group(0)], text)
+
+
 # DB接続プール
 db_pool: asyncpg.Pool | None = None
 db_init_lock = asyncio.Lock()
@@ -1819,8 +1903,9 @@ async def on_message(message: discord.Message):
     if not text:
         return
 
-    # 辞書で置換
+    # 辞書で置換（ユーザ辞書が先、built-in は後でユーザ側が優先）
     text = apply_dict(message.guild.id, text)
+    text = apply_reading_corrections(text)
 
     # 長すぎるメッセージは切り詰め
     if len(text) > MAX_READ_LENGTH:
