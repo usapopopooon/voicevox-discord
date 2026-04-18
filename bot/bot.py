@@ -1,5 +1,4 @@
 import asyncio
-import heapq
 import io
 import logging
 import os
@@ -49,6 +48,25 @@ logger.info(f"DEFAULT_SPEAKER_ID: {DEFAULT_SPEAKER}")
 intents = discord.Intents.default()
 intents.message_content = True
 
+# 共有 HTTP セッション（Keep-Alive で接続再利用）
+_http_session: aiohttp.ClientSession | None = None
+
+
+async def get_http_session() -> aiohttp.ClientSession:
+    """共有 ClientSession を返す（未作成/クローズ済みなら新規作成）"""
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        _http_session = aiohttp.ClientSession()
+    return _http_session
+
+
+async def close_http_session():
+    """共有 ClientSession をクローズする"""
+    global _http_session
+    if _http_session is not None and not _http_session.closed:
+        await _http_session.close()
+    _http_session = None
+
 
 class TtsClient(discord.Client):
     """discord.Client のサブクラス。終了時に共有 HTTP セッションも閉じる。"""
@@ -92,6 +110,22 @@ def _can_start_playback(vc: discord.VoiceClient) -> bool:
         return vc.is_connected() and not vc.is_playing() and not vc.is_paused()
     except discord.ClientException as e:
         logger.info(f"VC状態確認をスキップ（接続遷移中）: {e}")
+        return False
+
+
+def _is_vc_connected(vc: discord.VoiceClient) -> bool:
+    """VC が接続中かを安全に判定する（遷移中の ClientException を吸収）"""
+    try:
+        return vc.is_connected()
+    except discord.ClientException:
+        return False
+
+
+def _is_vc_playing(vc: discord.VoiceClient) -> bool:
+    """VC が再生中かを安全に判定する（遷移中の ClientException を吸収）"""
+    try:
+        return vc.is_playing()
+    except discord.ClientException:
         return False
 
 
@@ -145,9 +179,6 @@ MAX_READ_LENGTH = 100
 db_pool: asyncpg.Pool | None = None
 db_init_lock = asyncio.Lock()
 
-# 共有 HTTP セッション（Keep-Alive で接続再利用）
-_http_session: aiohttp.ClientSession | None = None
-
 # apply_dict のコンパイル済みパターンキャッシュ（ギルド毎）
 _dict_patterns: dict[int, re.Pattern[str]] = {}
 
@@ -167,22 +198,6 @@ def _require_db_pool() -> asyncpg.Pool:
     if db_pool is None:
         raise RuntimeError("DB接続プールが未初期化です（on_ready完了前の可能性）")
     return db_pool
-
-
-async def get_http_session() -> aiohttp.ClientSession:
-    """共有 ClientSession を返す（未作成/クローズ済みなら新規作成）"""
-    global _http_session
-    if _http_session is None or _http_session.closed:
-        _http_session = aiohttp.ClientSession()
-    return _http_session
-
-
-async def close_http_session():
-    """共有 ClientSession をクローズする"""
-    global _http_session
-    if _http_session is not None and not _http_session.closed:
-        await _http_session.close()
-    _http_session = None
 
 
 def _invalidate_dict_cache(guild_id: int):
@@ -535,6 +550,9 @@ async def _refresh_speakers_if_needed() -> None:
         now = time.monotonic()
         if now - _last_speaker_refresh_attempt < SPEAKER_REFRESH_INTERVAL:
             return
+        # fetch_speakers の成否に関わらず試行時刻を記録する。
+        # これによりエンジンが継続的にダウンしている場合の
+        # SPEAKER_REFRESH_INTERVAL 秒ごとの再試行に抑え、スパムを防ぐ。
         _last_speaker_refresh_attempt = now
         await fetch_speakers()
 
@@ -596,8 +614,8 @@ async def _build_synthesis_candidates(
         )
 
     if speaker_engine:
-        # マッピングに存在する候補を追加（先頭3件まで）
-        for global_id in heapq.nsmallest(3, speaker_engine.keys()):
+        # マッピングに存在する候補から speaker_id の小さい順に 3 件追加
+        for global_id in sorted(speaker_engine.keys())[:3]:
             engine_url, real_id = speaker_engine[global_id]
             _append_synthesis_candidate(
                 candidates,
@@ -607,7 +625,9 @@ async def _build_synthesis_candidates(
                 "cached_speaker_fallback",
             )
 
-    # 最終手段: 各エンジンへ DEFAULT_SPEAKER を直接投げる
+    # 最終手段: 各エンジンへ DEFAULT_SPEAKER を直接投げる。
+    # 注意: DEFAULT_SPEAKER は VOICEVOX のデフォルト値（3=ずんだもん）が前提。
+    # COEIROINK/SHAREVOX 単体運用の場合は DEFAULT_SPEAKER_ID を適切に設定すること。
     for _, engine_url, _ in ENGINES:
         _append_synthesis_candidate(
             candidates,
@@ -735,6 +755,11 @@ async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) ->
                     )
                     _synth_cache[key] = data
                     _synth_cache.move_to_end(key)
+                    # primary 候補と実際に成功した候補が異なる場合、
+                    # 次回 primary キーで lookup した時もヒットするよう二重保存する
+                    if key != cache_key:
+                        _synth_cache[cache_key] = data
+                        _synth_cache.move_to_end(cache_key)
                     while len(_synth_cache) > _SYNTH_CACHE_MAX:
                         _synth_cache.popitem(last=False)
 
@@ -788,8 +813,13 @@ async def play_next(guild_id: int, vc: discord.VoiceClient):
         try:
             vc.play(source, after=after_play)
         except discord.ClientException as e:
-            logger.warning(f"再生スキップ（接続切断済み）: {e}")
-            queue.appendleft(audio_data)
+            # VC が生きていれば一過性の可能性があるのでキューに積み直す。
+            # 切断済みなら next play_next を発火させる経路が無いので破棄。
+            if _is_vc_connected(vc):
+                logger.warning(f"再生失敗、音声をキュー先頭に戻す: {e}")
+                queue.appendleft(audio_data)
+            else:
+                logger.warning(f"再生スキップ（VC切断済み）、音声を破棄: {e}")
 
 
 # --- 辞書UI ---
@@ -959,7 +989,7 @@ async def join(interaction: discord.Interaction):
         settings = get_user_settings(guild.id, interaction.user.id)
         audio_data = await synthesize("せつぞくしました", settings, cache=True)
         vc = guild.voice_client
-        if vc and vc.is_connected():
+        if vc and _is_vc_connected(vc):
             queues[guild.id].append(audio_data)
             if _can_start_playback(vc):
                 await play_next(guild.id, vc)
@@ -1074,13 +1104,10 @@ async def skip(interaction: discord.Interaction):
         return
 
     vc = guild.voice_client
-    if not vc:
+    if not vc or not _is_vc_playing(vc):
         await interaction.response.send_message("再生中の音声はありません")
         return
     try:
-        if not vc.is_playing():
-            await interaction.response.send_message("再生中の音声はありません")
-            return
         vc.stop()
     except discord.ClientException:
         await interaction.response.send_message("再生中の音声はありません")

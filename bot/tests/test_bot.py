@@ -442,10 +442,30 @@ class TestPlayNextAdditional:
         queues[1004] = deque([b"audio"])
         # 例外が外に漏れないこと
         await play_next(1004, mock_vc)
-        # 再生開始できなかった音声は失われずキュー先頭へ戻る
+        # 接続中扱いの場合は音声を失わずキュー先頭へ戻る
         assert list(queues[1004]) == [b"audio"]
         queues.pop(1004, None)
         play_locks.pop(1004, None)
+
+    @patch("discord.FFmpegPCMAudio")
+    async def test_client_exception_drops_audio_when_disconnected(self, mock_ffmpeg):
+        """vc.play 失敗時に VC 切断済みなら音声を破棄する（キューに積み残さない）"""
+        import discord
+
+        from bot import play_locks, play_next, queues
+
+        mock_vc = MagicMock()
+        # _can_start_playback は True、その後の再確認で False になる
+        mock_vc.is_connected.side_effect = [True, False]
+        mock_vc.is_playing.return_value = False
+        mock_vc.is_paused.return_value = False
+        mock_vc.play.side_effect = discord.ClientException("Not connected to voice.")
+        queues[1006] = deque([b"audio"])
+        await play_next(1006, mock_vc)
+        # 切断済みなら積み直さず破棄
+        assert len(queues[1006]) == 0
+        queues.pop(1006, None)
+        play_locks.pop(1006, None)
 
     async def test_empty_queue_returns_silently(self):
         from bot import play_locks, play_next, queues
@@ -2474,6 +2494,54 @@ class TestSynthesizeCache:
             await close_http_session()
             bot._synth_cache.clear()
             bot._synth_in_flight.clear()
+
+    async def test_fallback_caches_under_primary_key_too(self, monkeypatch):
+        """primary 候補が失敗して fallback で成功した時、
+        primary キーでも引けるように二重キャッシュされること"""
+        import aiohttp
+
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        bot._synth_cache.clear()
+        bot._synth_in_flight.clear()
+        monkeypatch.setattr(
+            "bot.ENGINES",
+            [
+                ("PRIMARY", "http://primary:50021", 0),
+                ("FALLBACK", "http://fallback:50021", 10000),
+            ],
+        )
+        bot.speaker_engine.clear()
+        bot.speaker_engine[3] = ("http://primary:50021", 3)
+        try:
+            with aioresponses() as m:
+                m.post(
+                    re.compile(r"http://primary:50021/audio_query.*"),
+                    exception=aiohttp.ClientError("down"),
+                )
+                m.post(
+                    re.compile(r"http://fallback:50021/audio_query.*"),
+                    payload={},
+                )
+                m.post(
+                    re.compile(r"http://fallback:50021/synthesis.*"),
+                    body=b"fallback-result",
+                )
+                result = await synthesize("test", VoiceSettings(), cache=True)
+                assert result == b"fallback-result"
+
+            primary_key = ("http://primary:50021", 3, "test", 1.0, 0.0, 1.0, 1.0)
+            fallback_key = ("http://fallback:50021", 3, "test", 1.0, 0.0, 1.0, 1.0)
+            assert primary_key in bot._synth_cache
+            assert fallback_key in bot._synth_cache
+            assert bot._synth_cache[primary_key] == b"fallback-result"
+        finally:
+            await close_http_session()
+            bot._synth_cache.clear()
+            bot._synth_in_flight.clear()
+            bot.speaker_engine.clear()
+            bot.speaker_engine[3] = ("http://test-voicevox:50021", 3)
 
 
 def _make_wav_bytes(channels=2, rate=48000, width=2, n_samples=480):
