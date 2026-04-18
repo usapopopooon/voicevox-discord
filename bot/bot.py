@@ -3,6 +3,7 @@ import io
 import logging
 import os
 import re
+import time
 from collections import deque
 from dataclasses import dataclass
 
@@ -348,6 +349,9 @@ async def synthesize(text: str, settings: VoiceSettings) -> bytes:
 
 async def play_next(guild_id: int, vc: discord.VoiceClient):
     """キューから次の音声を再生する"""
+    if not vc.is_connected():
+        return
+
     queue = queues.get(guild_id, deque())
     if not queue:
         return
@@ -362,7 +366,10 @@ async def play_next(guild_id: int, vc: discord.VoiceClient):
             logger.error(f"再生エラー: {error}")
         asyncio.run_coroutine_threadsafe(play_next(guild_id, vc), client.loop)
 
-    vc.play(source, after=after_play)
+    try:
+        vc.play(source, after=after_play)
+    except discord.ClientException as e:
+        logger.warning(f"再生スキップ（接続切断済み）: {e}")
 
 
 # --- 辞書UI ---
@@ -563,13 +570,27 @@ async def on_voice_state_update(
         else:
             text = f"{name}さんがたいしつしました"
         try:
+            # 合成中にBotが切断されることがあるため、再度VC状態を確認する
+            vc = member.guild.voice_client
+            if not vc or not vc.is_connected():
+                return
+
             settings = get_user_settings(member.id)
             audio_data = await synthesize(text, settings)
+
+            vc = member.guild.voice_client
+            if not vc or not vc.is_connected():
+                return
+
             if guild_id not in queues:
                 queues[guild_id] = deque()
             queues[guild_id].append(audio_data)
+
             if not vc.is_playing() and not vc.is_paused():
                 await play_next(guild_id, vc)
+        except discord.ClientException:
+            # 退出直後の race で "Not connected to voice." が起こり得る
+            logger.info("入退室通知をスキップ: BotがVC未接続")
         except Exception as e:
             logger.error(f"入退室通知の音声合成エラー: {e}")
 
@@ -885,4 +906,11 @@ async def on_message(message: discord.Message):
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN environment variable is required")
-    client.run(DISCORD_TOKEN)
+
+    while True:
+        try:
+            client.run(DISCORD_TOKEN)
+            break
+        except discord.DiscordServerError as e:
+            logger.warning(f"Discord API一時障害のため再試行します: {e}")
+            time.sleep(5)
