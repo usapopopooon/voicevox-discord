@@ -3967,3 +3967,75 @@ class TestSpawnBackground:
         # task の done callback が走るのを待つ
         await asyncio_mod.sleep(0)
         assert task not in bot._background_tasks
+
+
+class TestRunSingleBotTokenInvalid:
+    def test_login_failure_sleeps_then_reraises(self, monkeypatch):
+        """LoginFailure 時は backoff sleep してから raise（fast restart loop 緩和）"""
+        import bot
+
+        # backoff を 0 化してテスト時間を抑える
+        monkeypatch.setattr(bot, "TOKEN_INVALID_BACKOFF_SECONDS", 0)
+
+        sleep_calls: list[float] = []
+        monkeypatch.setattr(
+            bot.time, "sleep", MagicMock(side_effect=lambda s: sleep_calls.append(s))
+        )
+
+        client_run = MagicMock(side_effect=discord.LoginFailure("bad token"))
+        monkeypatch.setattr(bot.client, "run", client_run)
+
+        with pytest.raises(discord.LoginFailure):
+            bot._run_single_bot("token-x")
+
+        # 1 回だけ呼ばれて即 raise（リトライしない）
+        assert client_run.call_count == 1
+        # backoff sleep が走った
+        assert sleep_calls == [0]
+
+    def test_4004_close_sleeps_then_reraises(self, monkeypatch):
+        """ConnectionClosed code=4004 時は backoff sleep してから raise"""
+        import bot
+
+        monkeypatch.setattr(bot, "TOKEN_INVALID_BACKOFF_SECONDS", 0)
+        sleep_calls: list[float] = []
+        monkeypatch.setattr(
+            bot.time, "sleep", MagicMock(side_effect=lambda s: sleep_calls.append(s))
+        )
+
+        # ConnectionClosed を 4004 で raise
+        cc = discord.ConnectionClosed.__new__(discord.ConnectionClosed)
+        cc.code = 4004
+        cc.reason = "Authentication failed"
+        cc.shard_id = None
+
+        client_run = MagicMock(side_effect=cc)
+        monkeypatch.setattr(bot.client, "run", client_run)
+
+        with pytest.raises(discord.ConnectionClosed):
+            bot._run_single_bot("token-x")
+
+        assert client_run.call_count == 1
+        assert sleep_calls == [0]
+
+    def test_non_4004_close_does_not_sleep(self, monkeypatch):
+        """4004 以外の ConnectionClosed は backoff sleep せず即 raise"""
+        import bot
+
+        sleep_calls: list[float] = []
+        monkeypatch.setattr(
+            bot.time, "sleep", MagicMock(side_effect=lambda s: sleep_calls.append(s))
+        )
+
+        cc = discord.ConnectionClosed.__new__(discord.ConnectionClosed)
+        cc.code = 1006  # 通常の切断
+        cc.reason = "abnormal"
+        cc.shard_id = None
+
+        client_run = MagicMock(side_effect=cc)
+        monkeypatch.setattr(bot.client, "run", client_run)
+
+        with pytest.raises(discord.ConnectionClosed):
+            bot._run_single_bot("token-x")
+
+        assert sleep_calls == []  # backoff sleep されない

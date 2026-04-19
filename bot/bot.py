@@ -2610,14 +2610,41 @@ async def on_message(message: discord.Message):
 
 # Discord ログイン時の 503 等のリトライ上限（指数バックオフ: 5, 10, 20, 40, 80 秒）
 MAX_LOGIN_RETRIES = 5
+# トークン無効化（再生成・失効・4004認証失敗）時のexit前 sleep。
+# コンテナの restart loop が即連続で回るのを防ぎ、ログ汚染とクォータ消費を抑える。
+TOKEN_INVALID_BACKOFF_SECONDS = 300
+
+
+def _sleep_and_raise_token_invalid(error_msg: str) -> None:
+    """トークン無効と判定したら長めに sleep してから raise。
+    コンテナ即再起動による fast restart loop を緩和する。"""
+    logger.error(
+        f"{error_msg} — DISCORD_TOKEN を確認してください "
+        f"（Discord Developer Portal で再生成 → 環境変数を更新 → redeploy）"
+        f" / {TOKEN_INVALID_BACKOFF_SECONDS}秒待機して exit します"
+    )
+    time.sleep(TOKEN_INVALID_BACKOFF_SECONDS)
 
 
 def _run_single_bot(discord_token: str):
-    """単一トークンでBotを起動（Discord API障害時は指数バックオフで再試行）。"""
+    """単一トークンでBotを起動（Discord API障害時は指数バックオフで再試行）。
+
+    トークン無効（401 LoginFailure / 4004）は永続的失敗としてリトライせず、
+    長めに sleep してから raise する（コンテナ fast restart loop 回避）。
+    """
     for attempt in range(MAX_LOGIN_RETRIES):
         try:
             client.run(discord_token)
             break
+        except discord.LoginFailure as e:
+            _sleep_and_raise_token_invalid(f"Discordログイン失敗: {e}")
+            raise
+        except discord.ConnectionClosed as e:
+            if getattr(e, "code", None) == 4004:
+                _sleep_and_raise_token_invalid(
+                    f"Discord認証失敗 (4004): セッション中にトークン無効化 ({e})"
+                )
+            raise
         except discord.DiscordServerError as e:
             if attempt == MAX_LOGIN_RETRIES - 1:
                 logger.error(f"最大リトライ回数到達、諦めます: {e}")
