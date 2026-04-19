@@ -292,6 +292,25 @@ class TestCleanText:
         assert clean_text("(´・ω・`)") == "しょぼーん"
         assert clean_text("(｀・ω・´)") == "しゃきーん"
 
+    def test_kaomoji_fullwidth_halfwidth_variants(self):
+        from bot import clean_text
+
+        assert clean_text("(´•ω•`)") == "しょぼーん"
+        assert clean_text("（´•ω•`）") == "しょぼーん"
+
+    def test_kaomoji_nested_parentheses_variants(self):
+        from bot import clean_text
+
+        canonical = "(((；ﾟдﾟ)))"
+        variant = "（((；ﾟдﾟ))）"
+        assert clean_text(variant) == clean_text(canonical)
+        assert clean_text(variant) != variant
+
+        canonical2 = "(;´-`)｡oO(ぇ･･･)"
+        variant2 = "（;´-`)｡oO(ぇ･･･）"
+        assert clean_text(variant2) == clean_text(canonical2)
+        assert clean_text(variant2) != variant2
+
     def test_empty_after_clean(self):
         from bot import clean_text
 

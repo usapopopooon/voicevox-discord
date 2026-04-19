@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import time
+import unicodedata
 import wave
 from collections import OrderedDict, deque
 from dataclasses import dataclass
@@ -349,6 +350,37 @@ _KAOMOJI_DICT: dict[str, str] = dict(_BUILTIN_KAOMOJI_DICT)
 # curated な基本形を優先（上書き可能）。ビルドイン辞書側の long-form と
 # 重複しにくいシンプル形を中心に登録している。
 _KAOMOJI_DICT.update(_BASIC_KAOMOJI)
+
+_KAOMOJI_CHAR_NORMALIZE_MAP = str.maketrans(
+    {
+        "•": "・",
+        "∙": "・",
+        "·": "・",
+        "⋅": "・",
+        "˙": "・",
+        "˘": "・",
+        "〜": "~",
+        "～": "~",
+        "―": "-",
+        "‐": "-",
+        "−": "-",
+    }
+)
+
+
+def _normalize_kaomoji_for_lookup(text: str) -> str:
+    """顔文字照合用に表記ゆれ（全半角・類似記号）を正規化する。"""
+    return unicodedata.normalize("NFKC", text).translate(_KAOMOJI_CHAR_NORMALIZE_MAP)
+
+
+_KAOMOJI_NORMALIZED_DICT: dict[str, str] = {}
+for _face, _reading in _KAOMOJI_DICT.items():
+    _normalized = _normalize_kaomoji_for_lookup(_face)
+    _KAOMOJI_NORMALIZED_DICT.setdefault(_normalized, _reading)
+_KAOMOJI_NORMALIZED_MAX_LEN = (
+    max((len(k) for k in _KAOMOJI_NORMALIZED_DICT), default=0) if _KAOMOJI_DICT else 0
+)
+
 if _KAOMOJI_DICT:
     _KAOMOJI_PATTERN: re.Pattern[str] | None = re.compile(
         "|".join(re.escape(k) for k in sorted(_KAOMOJI_DICT, key=len, reverse=True))
@@ -356,6 +388,8 @@ if _KAOMOJI_DICT:
     logger.info(f"顔文字辞書を読み込みました: {len(_KAOMOJI_DICT)}件")
 else:
     _KAOMOJI_PATTERN = None
+_KAOMOJI_OPENERS = {"(", "（"}
+_KAOMOJI_CLOSERS = {")", "）"}
 
 
 def _replace_kaomoji(text: str) -> str:
@@ -363,6 +397,45 @@ def _replace_kaomoji(text: str) -> str:
     if _KAOMOJI_PATTERN is None:
         return text
     return _KAOMOJI_PATTERN.sub(lambda m: _KAOMOJI_DICT[m.group(0)], text)
+
+
+def _replace_kaomoji_variant(text: str) -> str:
+    """顔文字の表記ゆれ（全半角・類似記号）を吸収して置換する。
+
+    入れ子括弧や複合顔文字も拾えるよう、開き括弧位置から最長一致で探索する。
+    """
+    if _KAOMOJI_NORMALIZED_MAX_LEN <= 0:
+        return text
+
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] not in _KAOMOJI_OPENERS:
+            out.append(text[i])
+            i += 1
+            continue
+
+        matched = False
+        max_end = min(n, i + _KAOMOJI_NORMALIZED_MAX_LEN)
+        for end in range(max_end, i + 1, -1):
+            if text[end - 1] not in _KAOMOJI_CLOSERS:
+                continue
+            token = text[i:end]
+            normalized = _normalize_kaomoji_for_lookup(token)
+            reading = _KAOMOJI_NORMALIZED_DICT.get(normalized)
+            if reading is None:
+                continue
+            out.append(reading)
+            i = end
+            matched = True
+            break
+
+        if not matched:
+            out.append(text[i])
+            i += 1
+
+    return "".join(out)
 
 
 def _replace_western_emoticon(text: str) -> str:
@@ -975,6 +1048,7 @@ def clean_text(text: str) -> str:
     → デコ記号 → Unicode絵文字
     → 肌色修飾子正規化 → URL/メール/カスタム絵文字 の順で置換する。"""
     text = _replace_kaomoji(text)
+    text = _replace_kaomoji_variant(text)
     text = _replace_western_emoticon(text)
     text = _replace_jp_net_slang(text)
     text = _replace_deco_symbols(text)
