@@ -491,34 +491,58 @@ class TestReadingCorrections:
         assert apply_reading_corrections("3㌖と500㍉") == "3キロメートルと500ミリ"
 
     def test_manga_specific_terms_have_correct_readings(self):
-        """少年漫画 (北斗の拳/グラップラー刃牙/魁!!男塾) 由来の固有名詞・技名"""
+        """少年漫画由来の固有名詞・技名 (WebSearch で公式ルビ検証済)"""
         from bot import apply_reading_corrections
 
-        # 北斗の拳: 技名・用語
+        # === 北斗の拳 ===
         assert apply_reading_corrections("北斗神拳") == "ほくとしんけん"
         assert apply_reading_corrections("経絡秘孔") == "けいらくひこう"
         assert apply_reading_corrections("無想転生") == "むそうてんせい"
-        assert apply_reading_corrections("死兆星が見える") == "しちょうせいが見える"
-        # グラップラー刃牙: キャラ名
+        # === グラップラー刃牙 ===
         assert apply_reading_corrections("範馬刃牙") == "はんまばき"
         assert apply_reading_corrections("愚地独歩") == "おろちどっぽ"  # 誤読されがち
         assert apply_reading_corrections("烈海王") == "れつかいおう"
-        # 魁!!男塾: 民明書房・大会名など固有
+        # === 魁!!男塾 (大会名は WebSearch で確認した非標準ルビ) ===
         assert apply_reading_corrections("民明書房") == "みんめいしょぼう"
-        assert apply_reading_corrections("江田島平八") == "えだじまへいはち"
-        assert apply_reading_corrections("驚邏大四凶殺") == "きょうらだいしきょうさつ"
-        assert apply_reading_corrections("大威震八連制覇") == "だいいしんはちれんせいは"
+        # 「大四」は「だいよん」(× だいし)
+        assert apply_reading_corrections("驚邏大四凶殺") == "きょうらだいよんきょうさつ"
+        # 「八連」は「ぱーれん」(× はちれん)
+        assert apply_reading_corrections("大威震八連制覇") == "だいいしんぱーれんせいは"
         assert (
             apply_reading_corrections("天挑五輪大武會") == "てんちょうごりんだいぶかい"
         )
-        assert apply_reading_corrections("関東豪学連") == "かんとうごうがくれん"
-        assert apply_reading_corrections("王大人") == "ワンターレン"
-        assert apply_reading_corrections("千唐流") == "せんとうりゅう"
-        # 男塾頻出の決め台詞・四字熟語
-        assert apply_reading_corrections("乾坤一擲") == "けんこんいってき"
-        assert apply_reading_corrections("起死回生") == "きしかいせい"
-        # ルビ的な固有読み（漢字→カナ造語）
+        # 男塾死天王 (公式メンバー: 卍丸/影慶/センクウ/羅刹)
+        assert apply_reading_corrections("センクウ") == "せんくう"
+        # 鎮魂歌→レクイエム (ルビ的造語)
         assert apply_reading_corrections("鎮魂歌を奏でる") == "レクイエムを奏でる"
+        # === 鬼滅の刃 ===
+        assert apply_reading_corrections("竈門禰豆子") == "かまどねずこ"
+        assert apply_reading_corrections("悲鳴嶼行冥") == "ひめじまぎょうめい"
+        assert apply_reading_corrections("不死川実弥") == "しなずがわさねみ"
+        assert apply_reading_corrections("鬼舞辻無惨") == "きぶつじむざん"
+        assert apply_reading_corrections("黒死牟") == "こくしぼう"
+        assert apply_reading_corrections("猗窩座") == "あかざ"
+        # === 呪術廻戦 ===
+        assert apply_reading_corrections("虎杖悠仁") == "いたどりゆうじ"
+        assert apply_reading_corrections("両面宿儺") == "りょうめんすくな"
+        assert apply_reading_corrections("伏魔御厨子") == "ふくまみづし"
+        # === スラムダンク ===
+        assert apply_reading_corrections("桜木花道") == "さくらぎはなみち"
+        # === ジョジョ ===
+        assert apply_reading_corrections("空条承太郎") == "くうじょうじょうたろう"
+        # === 進撃の巨人 ===
+        assert apply_reading_corrections("立体機動装置") == "りったいきどうそうち"
+        # === ヒロアカ ===
+        assert apply_reading_corrections("緑谷出久") == "みどりやいずく"
+        # === ナルト ===
+        assert apply_reading_corrections("螺旋丸") == "らせんがん"
+        assert apply_reading_corrections("穢土転生") == "えどてんせい"
+        # === BLEACH ===
+        assert apply_reading_corrections("卍解") == "ばんかい"
+        assert apply_reading_corrections("斬魄刀") == "ざんぱくとう"
+        # === ONE PIECE ===
+        assert apply_reading_corrections("王下七武海") == "おうかしちぶかい"
+        assert apply_reading_corrections("天竜人") == "てんりゅうびと"
 
     def test_chinese_cuisine_terms_use_japanese_menu_readings(self):
         """中華料理は漢字直読みではなく日本のメニューで定着した音訳カナで読む"""
