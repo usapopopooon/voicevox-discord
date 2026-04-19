@@ -239,6 +239,102 @@ class TestReadingCorrections:
         assert apply_reading_corrections("岡目八目で見よう") == "おかめはちもくで見よう"
         assert apply_reading_corrections("百花繚乱の時代") == "ひゃっかりょうらんの時代"
 
+    def test_replaces_artist_names_and_spellings(self):
+        from bot import apply_reading_corrections
+
+        assert apply_reading_corrections("Adoの新曲") == "アドの新曲"
+        assert apply_reading_corrections("米津玄師のライブ") == "よねずけんしのライブ"
+        assert (
+            apply_reading_corrections("Mrs. GREEN APPLEが好き")
+            == "みせす ぐりーん あっぷるが好き"
+        )
+        assert apply_reading_corrections("vaundyを聴く") == "バウンディを聴く"
+
+    def test_replaces_latest_buzzwords_from_2025_list(self):
+        from bot import apply_reading_corrections
+
+        assert apply_reading_corrections("権力勾配の問題") == "けんりょくこうばいの問題"
+        assert apply_reading_corrections("共連れを防ぐ") == "ともづれを防ぐ"
+        assert apply_reading_corrections("夏詣に行く") == "なつもうでに行く"
+        assert (
+            apply_reading_corrections("緊急銃猟を制度化")
+            == "きんきゅうじゅうりょうを制度化"
+        )
+
+    def test_replaces_eiken_pre2_level_english_words(self):
+        from bot import apply_reading_corrections
+
+        text = "We need to improve our ability and effort for success."
+        result = apply_reading_corrections(text)
+        assert "インプルーブ" in result
+        assert "アビリティ" in result
+        assert "エフォート" in result
+        assert "サクセス" in result
+
+    def test_replaces_english_words_case_insensitively(self):
+        from bot import apply_reading_corrections
+
+        text = "FOREIGN culture and TECHNOLOGY are important."
+        result = apply_reading_corrections(text)
+        assert "フォーリン" in result
+        assert "カルチャー" in result
+        assert "テクノロジー" in result
+
+    def test_keeps_unknown_english_word_as_is(self):
+        from bot import apply_reading_corrections
+
+        assert apply_reading_corrections("foobar") == "foobar"
+
+    def test_replaces_basic_english_words_like_home(self):
+        from bot import apply_reading_corrections
+
+        text = "home school office and computer"
+        result = apply_reading_corrections(text)
+        assert "ホーム" in result
+        assert "スクール" in result
+        assert "オフィス" in result
+        assert "コンピューター" in result
+
+    def test_replaces_jhs_core_verbs_and_inflections(self):
+        from bot import apply_reading_corrections
+
+        text = "I study, he studies, she studied, and they studying."
+        result = apply_reading_corrections(text)
+        assert "スタディ" in result
+        assert "スタディーズ" in result
+        assert "スタディード" in result
+        # studying は基底語 study に寄せて置換
+        assert "スタディ" in result
+
+    def test_replaces_irregular_jhs_verbs(self):
+        from bot import apply_reading_corrections
+
+        text = "He went and came, then saw and took."
+        result = apply_reading_corrections(text)
+        assert "ウェント" in result
+        assert "ケイム" in result
+        assert "ソー" in result
+        assert "トゥック" in result
+
+    def test_replaces_jhs_niche_adjectives(self):
+        from bot import apply_reading_corrections
+
+        text = "This wooden desk is useful but dangerous."
+        result = apply_reading_corrections(text)
+        assert "ウドゥン" in result
+        assert "ユースフル" in result
+        assert "デンジャラス" in result
+
+    def test_replaces_gerunds_from_jhs_verbs(self):
+        from bot import apply_reading_corrections
+
+        text = "swimming shopping practicing reading"
+        result = apply_reading_corrections(text)
+        assert "スイム" in result
+        assert "ショップ" in result
+        assert "プラクティス" in result
+        assert "リード" in result
+
     def test_user_dict_overrides_built_in_in_on_message_flow(self):
         """ユーザの /dict 登録が built-in 読みより優先される（on_message と同じ順序）"""
         from bot import apply_dict, apply_reading_corrections, guild_dicts
