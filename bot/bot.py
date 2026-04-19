@@ -391,6 +391,13 @@ else:
     _KAOMOJI_PATTERN = None
 _KAOMOJI_OPENERS = {"(", "（"}
 _KAOMOJI_CLOSERS = {")", "）"}
+_WESTERN_EMOTICON_TRIGGER_CHARS = {":", ";", "=", "8", "x", "X"}
+_JP_NET_SLANG_TRIGGER_CHARS = {"草", "w", "W", "ｗ", "Ｗ"}
+
+
+def _contains_any_char(text: str, candidates: set[str]) -> bool:
+    """text 内に候補文字のいずれかが含まれるかを返す。"""
+    return any(ch in candidates for ch in text)
 
 
 def _replace_kaomoji(text: str) -> str:
@@ -538,6 +545,7 @@ _DECO_SYMBOL_READING: dict[str, str] = {
 _DECO_SYMBOL_PATTERN = re.compile(
     "|".join(re.escape(k) for k in sorted(_DECO_SYMBOL_READING, key=len, reverse=True))
 )
+_DECO_SYMBOL_TRIGGER_CHARS = set(_DECO_SYMBOL_READING.keys())
 
 # demojize で得られる short code の代表的なデコ系読み
 _EMOJI_SHORTCODE_READING: dict[str, str] = {
@@ -630,6 +638,21 @@ def _replace_unicode_emoji(text: str) -> str:
     return _UNICODE_EMOJI_PATTERN.sub(
         lambda m: _UNICODE_EMOJI_READING[m.group(0)], text
     )
+
+
+def _contains_possible_unicode_emoji(text: str) -> bool:
+    """Unicode絵文字らしき文字を含むかを軽量に判定する。"""
+    for ch in text:
+        cp = ord(ch)
+        if ch in _UNICODE_EMOJI_READING:
+            return True
+        if ch == "\ufe0f":
+            return True
+        if 0x1F000 <= cp <= 0x1FAFF:
+            return True
+        if 0x2600 <= cp <= 0x27BF:
+            return True
+    return False
 
 
 def _normalize_emoji_modifiers(text: str) -> str:
@@ -1621,6 +1644,7 @@ _ENGLISH_WORD_PATTERN: re.Pattern[str] | None = (
     if _ENGLISH_WORD_READINGS
     else None
 )
+_ASCII_LETTER_PATTERN = re.compile(r"[A-Za-z]")
 _rebuild_reading_patterns()
 
 
@@ -1628,7 +1652,7 @@ def apply_reading_corrections(text: str) -> str:
     """誤読されやすい漢字を読み仮名に置換する（長一致優先）。"""
     if _READING_PATTERN is not None:
         text = _READING_PATTERN.sub(lambda m: _READING_CORRECTIONS[m.group(0)], text)
-    if _ENGLISH_WORD_PATTERN is not None:
+    if _ENGLISH_WORD_PATTERN is not None and _ASCII_LETTER_PATTERN.search(text):
         text = _ENGLISH_WORD_PATTERN.sub(_replace_english_word_match, text)
     return text
 
@@ -2033,12 +2057,18 @@ def clean_text(text: str) -> str:
     → デコ記号 → Unicode絵文字
     → 肌色修飾子正規化 → URL/メール/カスタム絵文字 の順で置換する。"""
     text = _replace_kaomoji(text)
-    text = _replace_kaomoji_variant(text)
-    text = _replace_western_emoticon(text)
-    text = _replace_jp_net_slang(text)
-    text = _replace_deco_symbols(text)
-    text = _replace_unicode_emoji(text)
-    text = _normalize_emoji_modifiers(text)
+    if _contains_any_char(text, _KAOMOJI_OPENERS):
+        text = _replace_kaomoji_variant(text)
+    if _contains_any_char(text, _WESTERN_EMOTICON_TRIGGER_CHARS):
+        text = _replace_western_emoticon(text)
+    if _contains_any_char(text, _JP_NET_SLANG_TRIGGER_CHARS):
+        text = _replace_jp_net_slang(text)
+    if _contains_any_char(text, _DECO_SYMBOL_TRIGGER_CHARS):
+        text = _replace_deco_symbols(text)
+    if _contains_possible_unicode_emoji(text):
+        text = _replace_unicode_emoji(text)
+    if _EMOJI_SKIN_TONE_MODIFIER_PATTERN.search(text):
+        text = _normalize_emoji_modifiers(text)
     return _CLEAN_TEXT_PATTERN.sub(_clean_text_replace, text).strip()
 
 
