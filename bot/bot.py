@@ -1571,6 +1571,36 @@ async def _reconnect_vc(
         _vc_reconnect_inflight.discard(guild_id)
 
 
+async def _safe_forget_voice_session(guild_id: int) -> None:
+    """`forget_voice_session` のラッパー。DB エラーを warning ログのみで握りつぶす。
+
+    on_voice_state_update から `_spawn_background` 経由で呼ばれる想定。
+    切断時は即座に DB session を削除する（手動切断/kick の場合は次起動時の
+    意図しない rejoin を防ぐ）。一時的なネットワーク断で discord.py が
+    auto-reconnect する場合は、再接続側で `_safe_record_voice_session` が
+    DB session を再記録するため deploy 復旧は損なわれない。
+    """
+    try:
+        await forget_voice_session(guild_id)
+    except Exception as e:
+        logger.warning(f"VCセッション削除失敗 guild={guild_id}: {e}")
+
+
+async def _safe_record_voice_session(
+    guild_id: int, voice_channel_id: int, text_channel_id: int
+) -> None:
+    """`record_voice_session` のラッパー。DB エラーを warning ログのみで握りつぶす。
+
+    discord.py の auto-reconnect 成功時に呼ばれ、切断時に消した DB session を
+    再記録する。これにより一時的ネットワーク断後に process が落ちても、
+    次起動時の `_restore_voice_sessions_on_startup` が VC へ復帰できる。
+    """
+    try:
+        await record_voice_session(guild_id, voice_channel_id, text_channel_id)
+    except Exception as e:
+        logger.warning(f"VCセッション再保存失敗 guild={guild_id}: {e}")
+
+
 async def _restore_voice_sessions_on_startup() -> None:
     """起動時に DB から全 VC セッションを順次復旧する（並列度1で rate limit 安全）。
 
@@ -2299,12 +2329,33 @@ async def on_voice_state_update(
             # `_cleanup_guild_state` を呼んで `read_channels` も最終的に削除する
             # ため、ここで保持しても安全（最終状態は全クリア）。
             _cleanup_guild_playback_state(guild_id)
+            # 手動切断/kick の場合 discord.py は auto-reconnect しないので、
+            # DB session を即座に削除して次起動時の意図しない rejoin を防ぐ。
+            # 一時的なネットワーク断で discord.py が auto-reconnect する場合は
+            # 下の reconnect パスで `_safe_record_voice_session` が再記録する。
+            _spawn_background(_safe_forget_voice_session(guild_id))
         else:
             # Bot 自身の再接続 → 残キューがあれば再生再開
             vc = member.guild.voice_client
             queue = queues.get(guild_id)
             if vc and queue and _can_start_playback(vc):
                 await play_next(guild_id, vc)
+            # discord.py の auto-reconnect 成功時は、切断時に消した DB session を
+            # 再記録する。これによりネットワーク断後にプロセスが落ちても、
+            # 次起動の `_restore_voice_sessions_on_startup` で復帰できる。
+            # `read_channels` が無い場合 (/leave 後等) は再記録しない。
+            # stale voice_client を弾くため `_is_vc_connected` で実接続を確認。
+            text_channel_id = read_channels.get(guild_id)
+            if (
+                _is_vc_connected(vc)
+                and text_channel_id is not None
+                and after.channel is not None
+            ):
+                _spawn_background(
+                    _safe_record_voice_session(
+                        guild_id, after.channel.id, text_channel_id
+                    )
+                )
         return
 
     vc = member.guild.voice_client

@@ -2573,11 +2573,15 @@ class TestOnVoiceStateUpdate:
             play_locks.pop(5010, None)
 
     async def test_bot_disconnect_cleans_playback_state_but_preserves_read_channels(
-        self,
+        self, monkeypatch
     ):
         """一時切断 (Discord WS 4006 等) で discord.py が auto-reconnect する
         ケースに備え、`read_channels` は保持し queue/locks のみクリアする。
+        DB session は即座に削除（auto-reconnect 時に再記録される設計）。
         """
+        import asyncio as asyncio_mod
+
+        import bot
         from bot import (
             client,
             engine_error_notified_at,
@@ -2589,6 +2593,9 @@ class TestOnVoiceStateUpdate:
 
         original_user = client._connection.user
         client._connection.user = MagicMock(id=4242)
+
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
 
         member = MagicMock()
         member.bot = True
@@ -2611,12 +2618,88 @@ class TestOnVoiceStateUpdate:
             assert 5005 not in engine_error_notified_at
             # read_channels は保持 (auto-reconnect 後の TTS 継続用)
             assert read_channels[5005] == 100
+            # spawn された _safe_forget_voice_session が完了するのを待つ
+            await asyncio_mod.sleep(0)
+            forget_mock.assert_awaited_once_with(5005)
         finally:
             client._connection.user = original_user
             queues.pop(5005, None)
             read_channels.pop(5005, None)
             play_locks.pop(5005, None)
             engine_error_notified_at.pop(5005, None)
+
+    async def test_bot_reconnect_re_records_voice_session(self, monkeypatch):
+        """auto-reconnect 成功時は切断時に消した DB session を再記録する。"""
+        import asyncio as asyncio_mod
+
+        import bot
+        from bot import client, on_voice_state_update, read_channels
+
+        original_user = client._connection.user
+        client._connection.user = MagicMock(id=4242)
+
+        record_mock = AsyncMock()
+        monkeypatch.setattr(bot, "record_voice_session", record_mock)
+
+        member = MagicMock()
+        member.bot = True
+        member.id = 4242
+        member.guild.id = 6001
+        vc = member.guild.voice_client
+        vc.is_connected.return_value = True
+        vc.is_playing.return_value = True  # play_next 抑止
+
+        before = MagicMock()
+        before.channel = None
+        after = MagicMock()
+        after.channel = MagicMock()
+        after.channel.id = 7001
+
+        read_channels[6001] = 8001  # 切断前の text_channel
+        try:
+            await on_voice_state_update(member, before, after)
+            # spawn された _safe_record_voice_session が完了するのを待つ
+            await asyncio_mod.sleep(0)
+            record_mock.assert_awaited_once_with(6001, 7001, 8001)
+        finally:
+            client._connection.user = original_user
+            read_channels.pop(6001, None)
+
+    async def test_bot_reconnect_skips_re_record_when_no_read_channel(
+        self, monkeypatch
+    ):
+        """read_channels が無い (/leave 後等) 場合は再記録しない。"""
+        import asyncio as asyncio_mod
+
+        import bot
+        from bot import client, on_voice_state_update, read_channels
+
+        original_user = client._connection.user
+        client._connection.user = MagicMock(id=4242)
+
+        record_mock = AsyncMock()
+        monkeypatch.setattr(bot, "record_voice_session", record_mock)
+
+        member = MagicMock()
+        member.bot = True
+        member.id = 4242
+        member.guild.id = 6002
+        vc = member.guild.voice_client
+        vc.is_connected.return_value = True
+        vc.is_playing.return_value = True
+
+        before = MagicMock()
+        before.channel = None
+        after = MagicMock()
+        after.channel = MagicMock()
+
+        read_channels.pop(6002, None)  # 明示的に未設定
+        try:
+            await on_voice_state_update(member, before, after)
+            await asyncio_mod.sleep(0)
+            record_mock.assert_not_called()
+        finally:
+            client._connection.user = original_user
 
     async def test_bot_reconnect_resumes_when_queue_exists(self):
         from bot import client, on_voice_state_update, queues
@@ -4641,3 +4724,48 @@ class TestCleanupGuildPlaybackState:
             assert 9103 not in bot.read_channels
         finally:
             bot.read_channels.pop(9103, None)
+
+
+class TestSafeVoiceSessionWrappers:
+    """切断時の即削除 / 再接続時の再記録ラッパー"""
+
+    async def test_safe_forget_calls_underlying(self, monkeypatch):
+        """切断時は遅延せず即座に DB session を削除する"""
+        import bot
+
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
+
+        await bot._safe_forget_voice_session(9201)
+        forget_mock.assert_awaited_once_with(9201)
+
+    async def test_safe_forget_swallows_db_error(self, monkeypatch):
+        """forget の DB エラーは warning ログのみで握りつぶす"""
+        import bot
+
+        async def raise_error(_gid):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(bot, "forget_voice_session", raise_error)
+        # 例外を上に伝播させない
+        await bot._safe_forget_voice_session(9202)
+
+    async def test_safe_record_calls_underlying(self, monkeypatch):
+        """再接続時は DB session を再記録する"""
+        import bot
+
+        record_mock = AsyncMock()
+        monkeypatch.setattr(bot, "record_voice_session", record_mock)
+
+        await bot._safe_record_voice_session(9203, 100, 200)
+        record_mock.assert_awaited_once_with(9203, 100, 200)
+
+    async def test_safe_record_swallows_db_error(self, monkeypatch):
+        """record の DB エラーは warning ログのみで握りつぶす"""
+        import bot
+
+        async def raise_error(_gid, _vc, _tc):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(bot, "record_voice_session", raise_error)
+        await bot._safe_record_voice_session(9204, 100, 200)

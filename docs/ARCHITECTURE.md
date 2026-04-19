@@ -187,7 +187,10 @@ CREATE TABLE schema_migrations (
 
 - `/join` 成功時に `active_voice_sessions` へ UPSERT、`/leave` `/vc(off)` `全員退出` `Bot がギルドから外れる` 時は DELETE
 - 起動時: `on_ready` 末尾で `_spawn_background(_restore_voice_sessions_on_startup())` を発火し、全 session を順次（並列度1で rate limit 安全側）に再接続
-- ランタイム切断（`on_voice_state_update` で Bot 自身が VC から外れた）: メモリ状態を `_cleanup_guild_state` でクリアするのみ。自動再接続は行わない（短時間ネットワーク断は discord.py の WebSocket 再接続が処理）
+- ランタイム切断（`on_voice_state_update` で Bot 自身が VC から外れた）: `_cleanup_guild_playback_state` で queue/locks のみクリアし `read_channels` は保持（discord.py auto-reconnect 後の TTS 継続用）。**DB session は即座に `_safe_forget_voice_session` で削除**（手動切断/kick の場合は次起動時の意図しない rejoin を防ぐ）
+- ランタイム再接続（`on_voice_state_update` で Bot が VC へ復帰）: `_safe_record_voice_session` で DB session を**再記録**する。これにより一時的ネットワーク断（WS 4006 等）で discord.py が auto-reconnect した場合、削除した DB session を再び記録し、後続のプロセス再起動時にも `_restore_voice_sessions_on_startup` で復帰できる。`read_channels` が無い場合（/leave 後等）は再記録しない
+- **手動切断/kick の動作**: discord.py は auto-reconnect しないため再接続イベント発火なし → 切断時に削除された DB session が空のまま → 次起動時 restore 対象外 → bot は VC に戻らない
+- **プロセス即死（deploy/crash）の動作**: `on_voice_state_update` が発火する前に process が消えるため DB session 削除は走らない → DB に session 残存 → 次起動時 `_restore_voice_sessions_on_startup` で復帰
 - 起動時 restore は接続前に以下をチェックし、満たさなければ復旧せず DB から session 削除:
     - **VC が存在する**（削除されていない・型が VoiceChannel）
     - **部屋に non-bot メンバーが1人以上いる**（無音 VC で待機しても TTS する相手がいないため）
