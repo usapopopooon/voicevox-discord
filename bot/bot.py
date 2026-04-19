@@ -181,16 +181,11 @@ synth_order_locks: dict[int, asyncio.Lock] = {}
 engine_error_notified_at: dict[int, float] = {}  # guild_id -> monotonic seconds
 ENGINE_ERROR_NOTIFY_INTERVAL = 30.0
 
-# VC 復旧の多重起動防止 + リトライ設定
+# 起動時 VC 復旧（_restore_voice_sessions_on_startup）の多重起動防止 + リトライ設定
 _vc_reconnect_inflight: set[int] = set()
 VC_RECONNECT_MAX_ATTEMPTS = 5
 VC_RECONNECT_BACKOFF_BASE_SECONDS = 2
 VC_RECONNECT_BACKOFF_MAX_SECONDS = 60
-
-# /leave 等のユーザー意図切断後の guard 期間。DB の forget が失敗していても
-# この期間内は復旧をブロックして「leave したのに勝手に戻る」を防ぐ。
-_recently_left_at: dict[int, float] = {}
-RECENTLY_LEFT_GUARD_SECONDS = 30.0
 
 # fire-and-forget タスクの参照保持（CPython の GC で消されないように）
 _background_tasks: set[asyncio.Task] = set()
@@ -202,23 +197,6 @@ def _spawn_background(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
-
-
-def _mark_recently_left(guild_id: int) -> None:
-    """ユーザー意図の切断を記録。直後の自動復旧を抑止するために使う。"""
-    _recently_left_at[guild_id] = time.monotonic()
-
-
-def _is_recently_left(guild_id: int) -> bool:
-    """直近 RECENTLY_LEFT_GUARD_SECONDS 以内に意図的切断されたか。
-    期限切れエントリは lazy 削除する。"""
-    ts = _recently_left_at.get(guild_id)
-    if ts is None:
-        return False
-    if time.monotonic() - ts < RECENTLY_LEFT_GUARD_SECONDS:
-        return True
-    _recently_left_at.pop(guild_id, None)
-    return False
 
 
 def _new_queue() -> deque[bytes]:
@@ -1375,26 +1353,13 @@ async def load_voice_sessions() -> list[tuple[int, int, int]]:
     ]
 
 
-async def _fetch_voice_session(guild_id: int) -> tuple[int, int] | None:
-    """guild_id の VC セッションを返す。無ければ None。"""
-    async with _require_db_pool().acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT voice_channel_id, text_channel_id "
-            "FROM active_voice_sessions WHERE guild_id = $1",
-            guild_id,
-        )
-    if row is None:
-        return None
-    return (row["voice_channel_id"], row["text_channel_id"])
-
-
 async def _reconnect_vc(
     guild_id: int, voice_channel_id: int, text_channel_id: int
 ) -> None:
     """元の VC へ再接続する（指数バックオフ・回数制限・多重起動防止）。
 
-    呼び出し元（on_voice_state_update / 起動時 restore）に関わらず、同じ
-    guild_id について同時に走らないよう _vc_reconnect_inflight でガードする。
+    呼び出し元は `_restore_voice_sessions_on_startup` のみ（起動時 VC 復旧）。
+    同一 guild の多重起動を防ぐため `_vc_reconnect_inflight` でガード。
     """
     if guild_id in _vc_reconnect_inflight:
         logger.info(f"VC復旧は既に進行中、重複起動をスキップ guild={guild_id}")
@@ -1416,6 +1381,28 @@ async def _reconnect_vc(
             )
             await forget_voice_session(guild_id)
             return
+
+        # 部屋に人がいなければ復帰しない（無音VCで待機しても TTS する相手がいない）
+        non_bot_members = [m for m in channel.members if not m.bot]
+        if not non_bot_members:
+            logger.info(
+                f"VC復旧抑止 guild={guild_id} channel={voice_channel_id}: "
+                "部屋に人がいないため復帰しません"
+            )
+            await forget_voice_session(guild_id)
+            return
+
+        # 接続/発言権限が剥奪されていれば即諦める（無駄なリトライ防止）
+        me = guild.me
+        if me is not None:
+            perms = channel.permissions_for(me)
+            if not perms.connect or not perms.speak:
+                logger.warning(
+                    f"VC復旧抑止 guild={guild_id} channel={voice_channel_id}: "
+                    "接続/発言権限がありません"
+                )
+                await forget_voice_session(guild_id)
+                return
 
         for attempt in range(VC_RECONNECT_MAX_ATTEMPTS):
             existing = guild.voice_client
@@ -1447,27 +1434,15 @@ async def _reconnect_vc(
         _vc_reconnect_inflight.discard(guild_id)
 
 
-async def _maybe_recover_voice_session(guild_id: int) -> None:
-    """on_voice_state_update から呼ばれ、DB にセッションが残っていれば復旧する。"""
-    # /leave 直後の guard：DB の forget が失敗してもユーザー意図を尊重する
-    if _is_recently_left(guild_id):
-        logger.info(
-            f"VC復旧抑止 guild={guild_id}: 直近のユーザー意図の切断（guard期間内）"
-        )
-        return
-    try:
-        session = await _fetch_voice_session(guild_id)
-    except Exception as e:
-        logger.warning(f"VCセッション照会失敗 guild={guild_id}: {e}")
-        return
-    if session is None:
-        return  # ユーザー意図の切断 → 復旧しない
-    voice_channel_id, text_channel_id = session
-    await _reconnect_vc(guild_id, voice_channel_id, text_channel_id)
-
-
 async def _restore_voice_sessions_on_startup() -> None:
-    """起動時に DB から全 VC セッションを順次復旧する（並列度1で rate limit 安全）。"""
+    """起動時に DB から全 VC セッションを順次復旧する（並列度1で rate limit 安全）。
+
+    既知の trade-off:
+    /leave 等のユーザー意図切断時に DB の forget が一過性障害で失敗し、
+    その後プロセス再起動 + 部屋に人が残存している場合は再起動後にこの restore で
+    rejoin してしまう。発生条件が3つ揃う必要があり実害は小さいため、メモリ guard 等
+    の追加複雑性は入れず受容している（ユーザーが再度 /leave すれば抜ける）。
+    """
     try:
         sessions = await load_voice_sessions()
     except Exception as e:
@@ -2165,9 +2140,10 @@ async def on_voice_state_update(
         guild_id = member.guild.id
         if after.channel is None:
             # Bot 自身の切断 → ギルド状態をクリーンアップ
+            # 自動復帰はモデレータ手動切断/権限剥奪等で false positive が起きるため
+            # 行わない。短時間ネットワーク断は discord.py の reconnect が処理。
+            # デプロイ・プロセス再起動の復旧は on_ready 起動時 restore に任せる。
             _cleanup_guild_state(guild_id)
-            # DB にセッションが残っていれば（=ユーザー意図ではない切断）、復旧を試みる
-            _spawn_background(_maybe_recover_voice_session(guild_id))
         else:
             # Bot 自身の再接続 → 残キューがあれば再生再開
             vc = member.guild.voice_client
@@ -2186,8 +2162,7 @@ async def on_voice_state_update(
     # Bot以外のメンバーがいなくなったら自動切断
     members = [m for m in bot_channel.members if not m.bot]
     if not members:
-        # ユーザー意図の切断扱い: DB forget が失敗しても guard で復旧抑止
-        _mark_recently_left(guild_id)
+        # ユーザー意図の切断: 起動時 restore で勝手に戻らないよう session も削除
         try:
             await forget_voice_session(guild_id)
         except Exception as e:
@@ -2239,8 +2214,7 @@ async def leave(interaction: discord.Interaction):
         return
 
     if guild.voice_client:
-        # ユーザー意図の切断: DB forget が失敗しても guard で復旧抑止
-        _mark_recently_left(guild.id)
+        # ユーザー意図の切断: 起動時 restore で勝手に戻らないよう session も削除
         try:
             await forget_voice_session(guild.id)
         except Exception as e:
@@ -2259,8 +2233,7 @@ async def vc_toggle(interaction: discord.Interaction):
         return
 
     if guild.voice_client:
-        # ユーザー意図の切断: DB forget が失敗しても guard で復旧抑止
-        _mark_recently_left(guild.id)
+        # ユーザー意図の切断: 起動時 restore で勝手に戻らないよう session も削除
         try:
             await forget_voice_session(guild.id)
         except Exception as e:

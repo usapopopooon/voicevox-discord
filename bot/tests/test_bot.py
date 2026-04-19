@@ -1022,7 +1022,6 @@ class TestMemoryOptimizations:
 
     def test_prune_candidate_fail_until_removes_expired(self):
         """期限切れバックオフ entry が削除され、未期限は残る"""
-        import time
 
         import bot
         from bot import _prune_candidate_fail_until
@@ -3744,12 +3743,30 @@ class TestVoiceSessionDB:
         finally:
             bot.db_pool = original
 
-    async def test_fetch_voice_session_returns_none_when_missing(self, mock_db_pool):
-        import bot
 
-        _, conn = mock_db_pool
-        conn.fetchrow = AsyncMock(return_value=None)
-        assert await bot._fetch_voice_session(123) is None
+def _make_valid_channel_mock(members=None):
+    """非空 members + connect/speak 両方OKの VoiceChannel mock を作る。"""
+    if members is None:
+        member = MagicMock()
+        member.bot = False
+        members = [member]
+    channel_mock = MagicMock(spec=discord.VoiceChannel)
+    channel_mock.connect = AsyncMock()
+    channel_mock.members = members
+    perms = MagicMock()
+    perms.connect = True
+    perms.speak = True
+    channel_mock.permissions_for = MagicMock(return_value=perms)
+    return channel_mock
+
+
+def _make_valid_guild_mock(channel_mock, voice_client=None):
+    """get_channel が channel_mock を返し、me がいる Guild mock を作る。"""
+    guild_mock = MagicMock()
+    guild_mock.me = MagicMock()
+    guild_mock.voice_client = voice_client
+    guild_mock.get_channel = MagicMock(return_value=channel_mock)
+    return guild_mock
 
 
 class TestReconnectVc:
@@ -3801,11 +3818,8 @@ class TestReconnectVc:
 
         existing_vc = MagicMock()
         existing_vc.is_connected = MagicMock(return_value=True)
-        guild_mock = MagicMock()
-        guild_mock.voice_client = existing_vc
-        channel_mock = MagicMock(spec=discord.VoiceChannel)
-        channel_mock.connect = AsyncMock()
-        guild_mock.get_channel = MagicMock(return_value=channel_mock)
+        channel_mock = _make_valid_channel_mock()
+        guild_mock = _make_valid_guild_mock(channel_mock, voice_client=existing_vc)
         client_mock = MagicMock()
         client_mock.get_guild = MagicMock(return_value=guild_mock)
         monkeypatch.setattr(bot, "client", client_mock)
@@ -3820,11 +3834,8 @@ class TestReconnectVc:
         bot.queues.pop(42, None)
         bot.read_channels.pop(42, None)
 
-        guild_mock = MagicMock()
-        guild_mock.voice_client = None
-        channel_mock = MagicMock(spec=discord.VoiceChannel)
-        channel_mock.connect = AsyncMock()
-        guild_mock.get_channel = MagicMock(return_value=channel_mock)
+        channel_mock = _make_valid_channel_mock()
+        guild_mock = _make_valid_guild_mock(channel_mock)
         client_mock = MagicMock()
         client_mock.get_guild = MagicMock(return_value=guild_mock)
         monkeypatch.setattr(bot, "client", client_mock)
@@ -3847,11 +3858,9 @@ class TestReconnectVc:
         # global asyncio.sleep を mock すると pytest-asyncio 内部に影響するため避ける。
         monkeypatch.setattr(bot, "VC_RECONNECT_BACKOFF_BASE_SECONDS", 0)
 
-        guild_mock = MagicMock()
-        guild_mock.voice_client = None
-        channel_mock = MagicMock(spec=discord.VoiceChannel)
+        channel_mock = _make_valid_channel_mock()
         channel_mock.connect = AsyncMock(side_effect=RuntimeError("connect failed"))
-        guild_mock.get_channel = MagicMock(return_value=channel_mock)
+        guild_mock = _make_valid_guild_mock(channel_mock)
         client_mock = MagicMock()
         client_mock.get_guild = MagicMock(return_value=guild_mock)
         monkeypatch.setattr(bot, "client", client_mock)
@@ -3863,87 +3872,87 @@ class TestReconnectVc:
         assert channel_mock.connect.await_count == 2
         forget_mock.assert_awaited_once_with(42)
 
-
-class TestMaybeRecoverVoiceSession:
-    async def test_no_session_does_not_reconnect(self, monkeypatch):
+    async def test_skips_when_channel_is_empty(self, monkeypatch):
+        """部屋に non-bot メンバーがいなければ復帰せず session を削除"""
         import bot
 
-        async def no_session(_gid):
-            return None
+        monkeypatch.setattr(bot, "_vc_reconnect_inflight", set())
+        channel_mock = _make_valid_channel_mock(members=[])
+        guild_mock = _make_valid_guild_mock(channel_mock)
+        client_mock = MagicMock()
+        client_mock.get_guild = MagicMock(return_value=guild_mock)
+        monkeypatch.setattr(bot, "client", client_mock)
 
-        monkeypatch.setattr(bot, "_fetch_voice_session", no_session)
-        reconnect_mock = AsyncMock()
-        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
 
-        await bot._maybe_recover_voice_session(42)
-        reconnect_mock.assert_not_called()
+        await bot._reconnect_vc(42, 100, 200)
+        channel_mock.connect.assert_not_called()
+        forget_mock.assert_awaited_once_with(42)
 
-    async def test_session_present_triggers_reconnect(self, monkeypatch):
+    async def test_skips_when_only_bots_in_channel(self, monkeypatch):
+        """部屋に bot しかいなければ復帰しない"""
         import bot
 
-        async def has_session(_gid):
-            return (100, 200)
+        monkeypatch.setattr(bot, "_vc_reconnect_inflight", set())
+        bot_member = MagicMock()
+        bot_member.bot = True
+        channel_mock = _make_valid_channel_mock(members=[bot_member])
+        guild_mock = _make_valid_guild_mock(channel_mock)
+        client_mock = MagicMock()
+        client_mock.get_guild = MagicMock(return_value=guild_mock)
+        monkeypatch.setattr(bot, "client", client_mock)
 
-        monkeypatch.setattr(bot, "_fetch_voice_session", has_session)
-        reconnect_mock = AsyncMock()
-        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
 
-        await bot._maybe_recover_voice_session(42)
-        reconnect_mock.assert_awaited_once_with(42, 100, 200)
+        await bot._reconnect_vc(42, 100, 200)
+        channel_mock.connect.assert_not_called()
+        forget_mock.assert_awaited_once_with(42)
 
-    async def test_db_failure_swallowed(self, monkeypatch):
+    async def test_skips_when_no_connect_permission(self, monkeypatch):
+        """connect 権限がなければ復帰せず session を削除（無駄なリトライ防止）"""
         import bot
 
-        async def boom(_gid):
-            raise RuntimeError("db down")
+        monkeypatch.setattr(bot, "_vc_reconnect_inflight", set())
+        channel_mock = _make_valid_channel_mock()
+        perms = MagicMock()
+        perms.connect = False
+        perms.speak = True
+        channel_mock.permissions_for = MagicMock(return_value=perms)
+        guild_mock = _make_valid_guild_mock(channel_mock)
+        client_mock = MagicMock()
+        client_mock.get_guild = MagicMock(return_value=guild_mock)
+        monkeypatch.setattr(bot, "client", client_mock)
 
-        monkeypatch.setattr(bot, "_fetch_voice_session", boom)
-        reconnect_mock = AsyncMock()
-        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
 
-        # 例外を握りつぶして reconnect を呼ばない
-        await bot._maybe_recover_voice_session(42)
-        reconnect_mock.assert_not_called()
+        await bot._reconnect_vc(42, 100, 200)
+        channel_mock.connect.assert_not_called()
+        forget_mock.assert_awaited_once_with(42)
 
-    async def test_recently_left_blocks_recovery_even_if_db_row_exists(
-        self, monkeypatch
-    ):
-        """/leave 直後（DB forget が失敗した場合でも）復旧をブロックする"""
+    async def test_skips_when_no_speak_permission(self, monkeypatch):
+        """speak 権限がなければ復帰しない（接続できても発言不可なら無意味）"""
         import bot
 
-        # DB には行が残っているシナリオ（forget が失敗した想定）
-        async def has_session(_gid):
-            return (100, 200)
+        monkeypatch.setattr(bot, "_vc_reconnect_inflight", set())
+        channel_mock = _make_valid_channel_mock()
+        perms = MagicMock()
+        perms.connect = True
+        perms.speak = False
+        channel_mock.permissions_for = MagicMock(return_value=perms)
+        guild_mock = _make_valid_guild_mock(channel_mock)
+        client_mock = MagicMock()
+        client_mock.get_guild = MagicMock(return_value=guild_mock)
+        monkeypatch.setattr(bot, "client", client_mock)
 
-        monkeypatch.setattr(bot, "_fetch_voice_session", has_session)
-        reconnect_mock = AsyncMock()
-        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
 
-        # guard をセット
-        monkeypatch.setattr(bot, "_recently_left_at", {42: time.monotonic()})
-
-        await bot._maybe_recover_voice_session(42)
-        reconnect_mock.assert_not_called()
-
-    async def test_expired_recently_left_does_not_block(self, monkeypatch):
-        """guard 期間を過ぎたら復旧する（lazy 削除も確認）"""
-        import bot
-
-        async def has_session(_gid):
-            return (100, 200)
-
-        monkeypatch.setattr(bot, "_fetch_voice_session", has_session)
-        reconnect_mock = AsyncMock()
-        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
-
-        # 期限切れタイムスタンプ
-        stale_map = {42: time.monotonic() - bot.RECENTLY_LEFT_GUARD_SECONDS - 10}
-        monkeypatch.setattr(bot, "_recently_left_at", stale_map)
-
-        await bot._maybe_recover_voice_session(42)
-        reconnect_mock.assert_awaited_once_with(42, 100, 200)
-        # lazy 削除されている
-        assert 42 not in stale_map
+        await bot._reconnect_vc(42, 100, 200)
+        channel_mock.connect.assert_not_called()
+        forget_mock.assert_awaited_once_with(42)
 
 
 class TestSpawnBackground:

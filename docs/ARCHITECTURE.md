@@ -168,13 +168,17 @@ CREATE TABLE schema_migrations (
 
 ### VC セッション復旧
 
-デプロイ・プロセス再起動・ネットワーク断などで Bot が VC から外れても、元の VC へ自動復帰する。
+デプロイ・プロセス再起動後に元の VC へ自動復帰する。**ランタイム切断（モデレータ手動切断・ネットワーク断・権限剥奪等）は復旧対象外** とし、ユーザーが必要なら `/join` で再接続する設計。これにより audit log 権限要件や false-positive 復帰を回避する。
 
-- `/join` 成功時に `active_voice_sessions` へ UPSERT、`/leave` `/vc`（off）`/全員退出` `/Bot がギルドから外れる` 時は DELETE → ユーザー意図の切断は復旧対象外
-- 起動時: `on_ready` 末尾で全 session を順次（並列度1で Discord rate limit 安全側）に再接続
-- 切断検知（`on_voice_state_update` で Bot 自身が VC から外れる）: DB に session が残っていれば非同期タスクで再接続を試みる
-- 再接続は指数バックオフ（2→4→8→16→32秒、最大 60秒、5回上限）。同一 guild の多重起動は `_vc_reconnect_inflight` でガード
-- 復旧不能（VC 削除・権限喪失・最大試行超過）と判定したら `active_voice_sessions` から該当行を削除し、ログのみで通知（テキストチャンネルへの投稿はしない）
+- `/join` 成功時に `active_voice_sessions` へ UPSERT、`/leave` `/vc(off)` `全員退出` `Bot がギルドから外れる` 時は DELETE
+- 起動時: `on_ready` 末尾で `_spawn_background(_restore_voice_sessions_on_startup())` を発火し、全 session を順次（並列度1で rate limit 安全側）に再接続
+- ランタイム切断（`on_voice_state_update` で Bot 自身が VC から外れた）: メモリ状態を `_cleanup_guild_state` でクリアするのみ。自動再接続は行わない（短時間ネットワーク断は discord.py の WebSocket 再接続が処理）
+- 起動時 restore は接続前に以下をチェックし、満たさなければ復旧せず DB から session 削除:
+    - **VC が存在する**（削除されていない・型が VoiceChannel）
+    - **部屋に non-bot メンバーが1人以上いる**（無音 VC で待機しても TTS する相手がいないため）
+    - **Bot に Connect / Speak 権限がある**（接続後の発言不可状態を避ける、無駄なリトライ回避）
+- 接続試行は指数バックオフ（2→4→8→16→32秒、最大 60秒、5回上限）。同一 guild の多重起動は `_vc_reconnect_inflight` でガード
+- 全リトライ失敗で諦めた場合も DB から session を削除し、次回起動時に再試行ループに入らないようにする
 - キュー（音声バッファ）は memory のみで永続化しない。再起動時はキュー空の状態で復帰する
 
 複数Botモード（`DISCORD_TOKENS`）では、親プロセスがマイグレーションを1回実行してから子プロセスを起動する。
