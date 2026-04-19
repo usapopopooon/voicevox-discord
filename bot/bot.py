@@ -4,17 +4,16 @@ import logging
 import os
 import re
 import subprocess
-import sys
 import time
 import unicodedata
 import wave
 from collections import OrderedDict, deque
 from dataclasses import dataclass
-from pathlib import Path
 
 import aiohttp
 import asyncpg
 import discord
+import migrate as migration_runner
 from discord import app_commands, ui
 from dotenv import load_dotenv
 from kaomoji_builtin import KAOMOJI_DICT as _BUILTIN_KAOMOJI_DICT
@@ -1637,8 +1636,6 @@ def apply_reading_corrections(text: str) -> str:
 # DB接続プール
 db_pool: asyncpg.Pool | None = None
 db_init_lock = asyncio.Lock()
-MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
-MIGRATION_LOCK_KEY = 775832991
 
 # apply_dict のコンパイル済みパターンキャッシュ（ギルド毎）
 _dict_patterns: dict[int, re.Pattern[str]] = {}
@@ -1814,64 +1811,6 @@ async def init_db():
                 )
             """)
         logger.info("DB初期化完了")
-
-
-def _migration_files() -> list[Path]:
-    """migrations ディレクトリの Python ファイルをファイル名順で返す。"""
-    if not MIGRATIONS_DIR.exists():
-        return []
-    files = sorted(MIGRATIONS_DIR.glob("*.py"))
-    return [p for p in files if p.name != "__init__.py"]
-
-
-async def run_pending_migrations():
-    """未適用マイグレーションを実行する（起動時自動実行）。
-
-    起動コマンドを変更せず `python bot.py` のままで運用できるよう、
-    on_ready から呼び出している。
-    """
-    files = _migration_files()
-    if not files:
-        return
-
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        await conn.execute("SELECT pg_advisory_lock($1)", MIGRATION_LOCK_KEY)
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                name TEXT PRIMARY KEY,
-                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            """
-        )
-        rows = await conn.fetch("SELECT name FROM schema_migrations")
-        applied = {row["name"] for row in rows}
-
-        for path in files:
-            name = path.name
-            if name in applied:
-                continue
-            logger.info(f"マイグレーション実行: {name}")
-            proc = await asyncio.to_thread(
-                subprocess.run,
-                [sys.executable, str(path)],
-                check=False,
-                env=os.environ.copy(),
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(f"マイグレーション失敗: {name}")
-            await conn.execute(
-                "INSERT INTO schema_migrations (name) VALUES ($1) "
-                "ON CONFLICT DO NOTHING",
-                name,
-            )
-            logger.info(f"マイグレーション完了: {name}")
-    finally:
-        try:
-            await conn.execute("SELECT pg_advisory_unlock($1)", MIGRATION_LOCK_KEY)
-        finally:
-            await conn.close()
 
 
 async def load_user_settings():
@@ -2612,7 +2551,7 @@ class DictDeleteModal(ui.Modal, title="辞書から削除"):
 
 @client.event
 async def on_ready():
-    await run_pending_migrations()
+    await migration_runner.run_pending_migrations(DATABASE_URL, logger=logger)
     await init_db()
     await load_builtin_reading_dicts()
     await load_user_settings()
