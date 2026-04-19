@@ -1530,6 +1530,11 @@ _JHS_CORE_ENGLISH_READINGS: dict[str, str] = {
 }
 _ENGLISH_WORD_READINGS.update(_JHS_CORE_ENGLISH_READINGS)
 
+# built-in 読み辞書のデフォルトスナップショット。
+# DB初期投入やフォールバックで利用する。
+_DEFAULT_READING_CORRECTIONS: dict[str, str] = dict(_READING_CORRECTIONS)
+_DEFAULT_ENGLISH_WORD_READINGS: dict[str, str] = dict(_ENGLISH_WORD_READINGS)
+
 
 def _english_base_form(word: str) -> str | None:
     """規則活用の英単語を基底語へ寄せる（簡易）。"""
@@ -1586,6 +1591,28 @@ def _replace_english_word_match(m: re.Match[str]) -> str:
     return _ENGLISH_WORD_READINGS.get(base, word)
 
 
+def _rebuild_reading_patterns() -> None:
+    """現在の built-in 読み辞書から正規表現を再構築する。"""
+    global _READING_PATTERN, _ENGLISH_WORD_PATTERN
+    _READING_PATTERN = (
+        re.compile(
+            "|".join(
+                re.escape(k)
+                for k in sorted(_READING_CORRECTIONS, key=len, reverse=True)
+            )
+        )
+        if _READING_CORRECTIONS
+        else None
+    )
+    _ENGLISH_WORD_PATTERN = (
+        # 英単語トークン全体を対象にし、callback側で辞書一致/基底語推定を行う。
+        # これにより swimming などの活用形も読み補正できる。
+        re.compile(r"(?<![A-Za-z])[A-Za-z]+(?![A-Za-z])", flags=re.IGNORECASE)
+        if _ENGLISH_WORD_READINGS
+        else None
+    )
+
+
 _ENGLISH_WORD_PATTERN: re.Pattern[str] | None = (
     # 英単語トークン全体を対象にし、callback側で辞書一致/基底語推定を行う。
     # これにより swimming などの活用形も読み補正できる。
@@ -1593,6 +1620,7 @@ _ENGLISH_WORD_PATTERN: re.Pattern[str] | None = (
     if _ENGLISH_WORD_READINGS
     else None
 )
+_rebuild_reading_patterns()
 
 
 def apply_reading_corrections(text: str) -> str:
@@ -1772,6 +1800,15 @@ async def init_db():
                     PRIMARY KEY (guild_id, user_id)
                 )
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS builtin_reading_dicts (
+                    dict_type TEXT NOT NULL,
+                    word TEXT NOT NULL,
+                    reading TEXT NOT NULL,
+                    PRIMARY KEY (dict_type, word),
+                    CHECK (dict_type IN ('jp', 'en'))
+                )
+            """)
         logger.info("DB初期化完了")
 
 
@@ -1827,6 +1864,57 @@ async def load_guild_dicts():
             guild_dicts[gid] = {}
         guild_dicts[gid][row["word"]] = row["reading"]
     logger.info(f"辞書設定を読み込みました: {len(guild_dicts)}ギルド")
+
+
+async def load_builtin_reading_dicts():
+    """DBから built-in 読み辞書をメモリにロード（空ならデフォルトを初期投入）。"""
+    async with _require_db_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT dict_type, word, reading FROM builtin_reading_dicts"
+        )
+
+        seeded = False
+        if not rows:
+            seed_rows = [
+                ("jp", w, r) for w, r in _DEFAULT_READING_CORRECTIONS.items()
+            ] + [("en", w, r) for w, r in _DEFAULT_ENGLISH_WORD_READINGS.items()]
+            await conn.executemany(
+                """
+                INSERT INTO builtin_reading_dicts (dict_type, word, reading)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (dict_type, word) DO UPDATE SET reading = EXCLUDED.reading
+                """,
+                seed_rows,
+            )
+            rows = [
+                {"dict_type": t, "word": w, "reading": r} for (t, w, r) in seed_rows
+            ]
+            seeded = True
+
+    jp: dict[str, str] = {}
+    en: dict[str, str] = {}
+    for row in rows:
+        if row["dict_type"] == "jp":
+            jp[row["word"]] = row["reading"]
+        elif row["dict_type"] == "en":
+            en[row["word"]] = row["reading"]
+
+    _READING_CORRECTIONS.clear()
+    _READING_CORRECTIONS.update(jp or _DEFAULT_READING_CORRECTIONS)
+    _ENGLISH_WORD_READINGS.clear()
+    _ENGLISH_WORD_READINGS.update(en or _DEFAULT_ENGLISH_WORD_READINGS)
+    _rebuild_reading_patterns()
+
+    if seeded:
+        logger.info(
+            "built-in読み辞書をDBへ初期投入しました: "
+            f"jp={len(_READING_CORRECTIONS)}件, en={len(_ENGLISH_WORD_READINGS)}件"
+        )
+    else:
+        logger.info(
+            "built-in読み辞書をDBから読み込みました: "
+            f"jp={len(_READING_CORRECTIONS)}件, en={len(_ENGLISH_WORD_READINGS)}件"
+        )
 
 
 async def add_dict_entry(guild_id: int, word: str, reading: str):
@@ -2451,6 +2539,7 @@ class DictDeleteModal(ui.Modal, title="辞書から削除"):
 @client.event
 async def on_ready():
     await init_db()
+    await load_builtin_reading_dicts()
     await load_user_settings()
     await load_guild_dicts()
     await load_guild_mutes()

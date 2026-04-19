@@ -1182,6 +1182,47 @@ class TestDbOperations:
         finally:
             bot.guild_mutes.pop(40, None)
 
+    async def test_load_builtin_reading_dicts_populates_from_db(self, mock_db_pool):
+        import bot
+
+        _, conn = mock_db_pool
+        conn.fetch.return_value = [
+            {"dict_type": "jp", "word": "雰囲気", "reading": "ふいんき"},
+            {"dict_type": "en", "word": "home", "reading": "ホームー"},
+        ]
+        original_jp = dict(bot._READING_CORRECTIONS)
+        original_en = dict(bot._ENGLISH_WORD_READINGS)
+        try:
+            await bot.load_builtin_reading_dicts()
+            assert bot.apply_reading_corrections("雰囲気") == "ふいんき"
+            assert bot.apply_reading_corrections("home") == "ホームー"
+        finally:
+            bot._READING_CORRECTIONS.clear()
+            bot._READING_CORRECTIONS.update(original_jp)
+            bot._ENGLISH_WORD_READINGS.clear()
+            bot._ENGLISH_WORD_READINGS.update(original_en)
+            bot._rebuild_reading_patterns()
+
+    async def test_load_builtin_reading_dicts_seeds_when_empty(self, mock_db_pool):
+        import bot
+
+        _, conn = mock_db_pool
+        conn.fetch.return_value = []
+        conn.executemany = AsyncMock()
+        original_jp = dict(bot._READING_CORRECTIONS)
+        original_en = dict(bot._ENGLISH_WORD_READINGS)
+        try:
+            await bot.load_builtin_reading_dicts()
+            conn.executemany.assert_awaited_once()
+            assert bot.apply_reading_corrections("雰囲気") in {"ふんいき", "ふいんき"}
+            assert bot.apply_reading_corrections("home") == "ホーム"
+        finally:
+            bot._READING_CORRECTIONS.clear()
+            bot._READING_CORRECTIONS.update(original_jp)
+            bot._ENGLISH_WORD_READINGS.clear()
+            bot._ENGLISH_WORD_READINGS.update(original_en)
+            bot._rebuild_reading_patterns()
+
     async def test_add_dict_entry_executes(self, mock_db_pool):
         from bot import add_dict_entry
 
