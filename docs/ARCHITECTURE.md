@@ -131,6 +131,14 @@ CREATE TABLE builtin_reading_dicts (
     CHECK (dict_type IN ('jp', 'en'))
 );
 
+-- 再起動・切断時に元の VC へ復旧するためのアクティブセッション
+CREATE TABLE active_voice_sessions (
+    guild_id BIGINT PRIMARY KEY,
+    voice_channel_id BIGINT NOT NULL,
+    text_channel_id BIGINT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- 適用済みマイグレーション管理
 CREATE TABLE schema_migrations (
     name TEXT PRIMARY KEY,
@@ -156,6 +164,18 @@ CREATE TABLE schema_migrations (
 3. `load_builtin_reading_dicts` で built-in 辞書を DB + デフォルトから再構築
 4. ユーザー設定・ギルド辞書・ミュートをメモリへロード
 5. スラッシュコマンド同期・スピーカー取得
+6. `_restore_voice_sessions_on_startup` で `active_voice_sessions` を読み、再起動前に接続していた VC へ順次再接続
+
+### VC セッション復旧
+
+デプロイ・プロセス再起動・ネットワーク断などで Bot が VC から外れても、元の VC へ自動復帰する。
+
+- `/join` 成功時に `active_voice_sessions` へ UPSERT、`/leave` `/vc`（off）`/全員退出` `/Bot がギルドから外れる` 時は DELETE → ユーザー意図の切断は復旧対象外
+- 起動時: `on_ready` 末尾で全 session を順次（並列度1で Discord rate limit 安全側）に再接続
+- 切断検知（`on_voice_state_update` で Bot 自身が VC から外れる）: DB に session が残っていれば非同期タスクで再接続を試みる
+- 再接続は指数バックオフ（2→4→8→16→32秒、最大 60秒、5回上限）。同一 guild の多重起動は `_vc_reconnect_inflight` でガード
+- 復旧不能（VC 削除・権限喪失・最大試行超過）と判定したら `active_voice_sessions` から該当行を削除し、ログのみで通知（テキストチャンネルへの投稿はしない）
+- キュー（音声バッファ）は memory のみで永続化しない。再起動時はキュー空の状態で復帰する
 
 複数Botモード（`DISCORD_TOKENS`）では、親プロセスがマイグレーションを1回実行してから子プロセスを起動する。
 親は子プロセスを監視し、終了を検知すると指数バックオフ（1→2→4→8→16秒、上限60秒）で再起動する。

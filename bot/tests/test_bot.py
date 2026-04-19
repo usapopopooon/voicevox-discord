@@ -1,21 +1,24 @@
 import re
 import signal
 import subprocess
+import time
 from collections import deque
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
+import discord
 import pytest
 from aioresponses import aioresponses
 
 
-def _make_mock_pool(rows=None):
+def _make_mock_pool(rows=None, fetchrow_result=None):
     """asyncpg.Pool のモックを作成（acquire() が conn を返す async ctx mgr）"""
     conn = MagicMock()
     conn.execute = AsyncMock()
     conn.executemany = AsyncMock()
     conn.fetch = AsyncMock(return_value=rows or [])
     conn.fetchval = AsyncMock(return_value=None)
+    conn.fetchrow = AsyncMock(return_value=fetchrow_result)
 
     cm = MagicMock()
     cm.__aenter__ = AsyncMock(return_value=conn)
@@ -3702,3 +3705,265 @@ class TestPlayNextUsesPcm:
         finally:
             queues.pop(2001, None)
             play_locks.pop(2001, None)
+
+
+class TestVoiceSessionDB:
+    async def test_record_voice_session_upserts(self, mock_db_pool):
+        import bot
+
+        _, conn = mock_db_pool
+        await bot.record_voice_session(100, 200, 300)
+        conn.execute.assert_awaited_once()
+        sql = conn.execute.await_args.args[0]
+        assert "INSERT INTO active_voice_sessions" in sql
+        assert "ON CONFLICT (guild_id) DO UPDATE" in sql
+
+    async def test_forget_voice_session_deletes(self, mock_db_pool):
+        import bot
+
+        _, conn = mock_db_pool
+        await bot.forget_voice_session(100)
+        conn.execute.assert_awaited_once()
+        sql = conn.execute.await_args.args[0]
+        assert "DELETE FROM active_voice_sessions" in sql
+        assert conn.execute.await_args.args[1] == 100
+
+    async def test_load_voice_sessions_returns_tuples(self):
+        import bot
+
+        rows = [
+            {"guild_id": 1, "voice_channel_id": 11, "text_channel_id": 111},
+            {"guild_id": 2, "voice_channel_id": 22, "text_channel_id": 222},
+        ]
+        pool, _ = _make_mock_pool(rows=rows)
+        original = bot.db_pool
+        bot.db_pool = pool
+        try:
+            sessions = await bot.load_voice_sessions()
+            assert sessions == [(1, 11, 111), (2, 22, 222)]
+        finally:
+            bot.db_pool = original
+
+    async def test_fetch_voice_session_returns_none_when_missing(self, mock_db_pool):
+        import bot
+
+        _, conn = mock_db_pool
+        conn.fetchrow = AsyncMock(return_value=None)
+        assert await bot._fetch_voice_session(123) is None
+
+
+class TestReconnectVc:
+    async def test_skips_when_inflight(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(bot, "_vc_reconnect_inflight", {42})
+        client_mock = MagicMock()
+        monkeypatch.setattr(bot, "client", client_mock)
+
+        await bot._reconnect_vc(42, 100, 200)
+        client_mock.get_guild.assert_not_called()
+
+    async def test_forgets_session_when_guild_missing(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(bot, "_vc_reconnect_inflight", set())
+        client_mock = MagicMock()
+        client_mock.get_guild = MagicMock(return_value=None)
+        monkeypatch.setattr(bot, "client", client_mock)
+
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
+
+        await bot._reconnect_vc(42, 100, 200)
+        forget_mock.assert_awaited_once_with(42)
+
+    async def test_forgets_session_when_channel_missing(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(bot, "_vc_reconnect_inflight", set())
+        guild_mock = MagicMock()
+        guild_mock.get_channel = MagicMock(return_value=None)
+        guild_mock.voice_client = None
+        client_mock = MagicMock()
+        client_mock.get_guild = MagicMock(return_value=guild_mock)
+        monkeypatch.setattr(bot, "client", client_mock)
+
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
+
+        await bot._reconnect_vc(42, 100, 200)
+        forget_mock.assert_awaited_once_with(42)
+
+    async def test_skips_when_already_connected(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(bot, "_vc_reconnect_inflight", set())
+
+        existing_vc = MagicMock()
+        existing_vc.is_connected = MagicMock(return_value=True)
+        guild_mock = MagicMock()
+        guild_mock.voice_client = existing_vc
+        channel_mock = MagicMock(spec=discord.VoiceChannel)
+        channel_mock.connect = AsyncMock()
+        guild_mock.get_channel = MagicMock(return_value=channel_mock)
+        client_mock = MagicMock()
+        client_mock.get_guild = MagicMock(return_value=guild_mock)
+        monkeypatch.setattr(bot, "client", client_mock)
+
+        await bot._reconnect_vc(42, 100, 200)
+        channel_mock.connect.assert_not_called()
+
+    async def test_successful_connect_sets_queue_and_read_channel(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(bot, "_vc_reconnect_inflight", set())
+        bot.queues.pop(42, None)
+        bot.read_channels.pop(42, None)
+
+        guild_mock = MagicMock()
+        guild_mock.voice_client = None
+        channel_mock = MagicMock(spec=discord.VoiceChannel)
+        channel_mock.connect = AsyncMock()
+        guild_mock.get_channel = MagicMock(return_value=channel_mock)
+        client_mock = MagicMock()
+        client_mock.get_guild = MagicMock(return_value=guild_mock)
+        monkeypatch.setattr(bot, "client", client_mock)
+
+        try:
+            await bot._reconnect_vc(42, 100, 200)
+            channel_mock.connect.assert_awaited_once()
+            assert 42 in bot.queues
+            assert bot.read_channels[42] == 200
+        finally:
+            bot.queues.pop(42, None)
+            bot.read_channels.pop(42, None)
+
+    async def test_gives_up_after_max_attempts(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(bot, "_vc_reconnect_inflight", set())
+        monkeypatch.setattr(bot, "VC_RECONNECT_MAX_ATTEMPTS", 2)
+        # backoff = min(0 * 2^n, 60) = 0 → asyncio.sleep(0) で即時 yield。
+        # global asyncio.sleep を mock すると pytest-asyncio 内部に影響するため避ける。
+        monkeypatch.setattr(bot, "VC_RECONNECT_BACKOFF_BASE_SECONDS", 0)
+
+        guild_mock = MagicMock()
+        guild_mock.voice_client = None
+        channel_mock = MagicMock(spec=discord.VoiceChannel)
+        channel_mock.connect = AsyncMock(side_effect=RuntimeError("connect failed"))
+        guild_mock.get_channel = MagicMock(return_value=channel_mock)
+        client_mock = MagicMock()
+        client_mock.get_guild = MagicMock(return_value=guild_mock)
+        monkeypatch.setattr(bot, "client", client_mock)
+
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
+
+        await bot._reconnect_vc(42, 100, 200)
+        assert channel_mock.connect.await_count == 2
+        forget_mock.assert_awaited_once_with(42)
+
+
+class TestMaybeRecoverVoiceSession:
+    async def test_no_session_does_not_reconnect(self, monkeypatch):
+        import bot
+
+        async def no_session(_gid):
+            return None
+
+        monkeypatch.setattr(bot, "_fetch_voice_session", no_session)
+        reconnect_mock = AsyncMock()
+        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
+
+        await bot._maybe_recover_voice_session(42)
+        reconnect_mock.assert_not_called()
+
+    async def test_session_present_triggers_reconnect(self, monkeypatch):
+        import bot
+
+        async def has_session(_gid):
+            return (100, 200)
+
+        monkeypatch.setattr(bot, "_fetch_voice_session", has_session)
+        reconnect_mock = AsyncMock()
+        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
+
+        await bot._maybe_recover_voice_session(42)
+        reconnect_mock.assert_awaited_once_with(42, 100, 200)
+
+    async def test_db_failure_swallowed(self, monkeypatch):
+        import bot
+
+        async def boom(_gid):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(bot, "_fetch_voice_session", boom)
+        reconnect_mock = AsyncMock()
+        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
+
+        # 例外を握りつぶして reconnect を呼ばない
+        await bot._maybe_recover_voice_session(42)
+        reconnect_mock.assert_not_called()
+
+    async def test_recently_left_blocks_recovery_even_if_db_row_exists(
+        self, monkeypatch
+    ):
+        """/leave 直後（DB forget が失敗した場合でも）復旧をブロックする"""
+        import bot
+
+        # DB には行が残っているシナリオ（forget が失敗した想定）
+        async def has_session(_gid):
+            return (100, 200)
+
+        monkeypatch.setattr(bot, "_fetch_voice_session", has_session)
+        reconnect_mock = AsyncMock()
+        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
+
+        # guard をセット
+        monkeypatch.setattr(bot, "_recently_left_at", {42: time.monotonic()})
+
+        await bot._maybe_recover_voice_session(42)
+        reconnect_mock.assert_not_called()
+
+    async def test_expired_recently_left_does_not_block(self, monkeypatch):
+        """guard 期間を過ぎたら復旧する（lazy 削除も確認）"""
+        import bot
+
+        async def has_session(_gid):
+            return (100, 200)
+
+        monkeypatch.setattr(bot, "_fetch_voice_session", has_session)
+        reconnect_mock = AsyncMock()
+        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
+
+        # 期限切れタイムスタンプ
+        stale_map = {42: time.monotonic() - bot.RECENTLY_LEFT_GUARD_SECONDS - 10}
+        monkeypatch.setattr(bot, "_recently_left_at", stale_map)
+
+        await bot._maybe_recover_voice_session(42)
+        reconnect_mock.assert_awaited_once_with(42, 100, 200)
+        # lazy 削除されている
+        assert 42 not in stale_map
+
+
+class TestSpawnBackground:
+    async def test_keeps_task_reference_until_done(self, monkeypatch):
+        """create_task したタスクが GC されないよう参照保持し、完了で自動破棄する"""
+        import asyncio as asyncio_mod
+
+        import bot
+
+        bot._background_tasks.clear()
+
+        completed = asyncio_mod.Event()
+
+        async def work():
+            completed.set()
+
+        task = bot._spawn_background(work())
+        # 起動直後は参照が set 内にある
+        assert task in bot._background_tasks
+        await completed.wait()
+        # task の done callback が走るのを待つ
+        await asyncio_mod.sleep(0)
+        assert task not in bot._background_tasks
