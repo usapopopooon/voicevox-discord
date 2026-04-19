@@ -185,6 +185,60 @@ class TestReadingCorrections:
 
         assert apply_reading_corrections("今日はいい日") == "今日はいい日"
 
+    def test_replaces_business_and_news_terms(self):
+        from bot import apply_reading_corrections
+
+        assert apply_reading_corrections("進捗を共有する") == "しんちょくを共有する"
+        assert apply_reading_corrections("規約を遵守する") == "規約をじゅんしゅする"
+        assert apply_reading_corrections("認識に齟齬がある") == "認識にそごがある"
+        assert (
+            apply_reading_corrections("医療体制が逼迫する") == "医療体制がひっぱくする"
+        )
+        assert apply_reading_corrections("案を踏襲する") == "案をとうしゅうする"
+
+    def test_replaces_commonly_misread_practical_words(self):
+        from bot import apply_reading_corrections
+
+        assert apply_reading_corrections("重複を避ける") == "ちょうふくを避ける"
+        assert apply_reading_corrections("資料を貼付する") == "資料をちょうふする"
+        assert apply_reading_corrections("続柄を記入する") == "つづきがらを記入する"
+        assert apply_reading_corrections("月極駐車場") == "つきぎめ駐車場"
+        assert apply_reading_corrections("既出の質問") == "きしゅつの質問"
+        assert apply_reading_corrections("生粋の江戸っ子") == "きっすいの江戸っ子"
+
+    def test_replaces_classic_hard_words(self):
+        from bot import apply_reading_corrections
+
+        assert apply_reading_corrections("未曾有の災害") == "みぞうの災害"
+        assert apply_reading_corrections("何卒よろしく") == "なにとぞよろしく"
+        assert apply_reading_corrections("漸く終わった") == "ようやく終わった"
+        assert apply_reading_corrections("凡そ理解した") == "およそ理解した"
+
+    def test_replaces_yojijukugo_and_kotowaza_terms(self):
+        from bot import apply_reading_corrections
+
+        assert (
+            apply_reading_corrections("臥薪嘗胆して挑む") == "がしんしょうたんして挑む"
+        )
+        assert apply_reading_corrections("付和雷同しない") == "ふわらいどうしない"
+        assert apply_reading_corrections("画竜点睛を欠く") == "がりょうてんせいを欠く"
+        assert apply_reading_corrections("塞翁が馬という話") == "さいおうがうまという話"
+        assert apply_reading_corrections("漁夫の利を得る") == "ぎょふのりを得る"
+
+    def test_replaces_additional_yojijukugo_and_proverbs(self):
+        from bot import apply_reading_corrections
+
+        assert (
+            apply_reading_corrections("青天の霹靂だった") == "せいてんのへきれきだった"
+        )
+        assert (
+            apply_reading_corrections("井の中の蛙大海を知らず")
+            == "いのなかのかわずたいかいをしらず"
+        )
+        assert apply_reading_corrections("虎の威を借る狐だ") == "とらのいをかるきつねだ"
+        assert apply_reading_corrections("岡目八目で見よう") == "おかめはちもくで見よう"
+        assert apply_reading_corrections("百花繚乱の時代") == "ひゃっかりょうらんの時代"
+
     def test_user_dict_overrides_built_in_in_on_message_flow(self):
         """ユーザの /dict 登録が built-in 読みより優先される（on_message と同じ順序）"""
         from bot import apply_dict, apply_reading_corrections, guild_dicts
