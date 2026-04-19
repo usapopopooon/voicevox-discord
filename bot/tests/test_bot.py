@@ -3893,9 +3893,12 @@ class TestReconnectVc:
         forget_mock.assert_awaited_once_with(42)
 
     async def test_skips_when_already_connected(self, monkeypatch):
+        """既に接続中なら connect は呼ばないが、メモリ状態は再反映される"""
         import bot
 
         monkeypatch.setattr(bot, "_vc_reconnect_inflight", set())
+        bot.queues.pop(42, None)
+        bot.read_channels.pop(42, None)
 
         existing_vc = MagicMock()
         existing_vc.is_connected = MagicMock(return_value=True)
@@ -3905,8 +3908,16 @@ class TestReconnectVc:
         client_mock.get_guild = MagicMock(return_value=guild_mock)
         monkeypatch.setattr(bot, "client", client_mock)
 
-        await bot._reconnect_vc(42, 100, 200)
-        channel_mock.connect.assert_not_called()
+        try:
+            await bot._reconnect_vc(42, 100, 200)
+            channel_mock.connect.assert_not_called()
+            # 「既に接続中」パスでも read_channels は必ず設定される
+            # （これがないと on_message がテキストを読まなくなる）
+            assert bot.read_channels[42] == 200
+            assert 42 in bot.queues
+        finally:
+            bot.queues.pop(42, None)
+            bot.read_channels.pop(42, None)
 
     async def test_successful_connect_sets_queue_and_read_channel(self, monkeypatch):
         import bot

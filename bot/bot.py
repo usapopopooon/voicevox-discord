@@ -1509,15 +1509,32 @@ async def _reconnect_vc(
                 await forget_voice_session(guild_id)
                 return
 
+        def _ensure_session_memory() -> None:
+            """VC が接続中という前提で session メモリを再反映する。
+
+            起動時 restore は新規プロセスで queues は空のはずだが、念のため
+            空 queue で初期化する（前回プロセスの残骸クリーンアップも兼ねる）。
+            read_channels は DB の text_channel_id で上書きし、新規 connect
+            でも resume でも on_message が読み上げ対象として認識できるよう
+            にする（read_channels が None だと on_message が早期 return して
+            テキストを読まなくなるバグの修正）。
+            """
+            queues[guild_id] = _new_queue()
+            read_channels[guild_id] = text_channel_id
+
         for attempt in range(VC_RECONNECT_MAX_ATTEMPTS):
             existing = guild.voice_client
             if existing and _is_vc_connected(existing):
-                logger.info(f"VC既に接続中、復旧不要 guild={guild_id}")
+                # discord.py の voice resume 等で voice_client が既に張られて
+                # いるケース。connect は不要だがメモリ状態は新規プロセスで
+                # 空のため、ここでも必ず再反映する（read_channels が None だと
+                # on_message が早期 return してテキストを読まなくなるバグ）。
+                _ensure_session_memory()
+                logger.info(f"VC既に接続中、メモリ状態を再反映 guild={guild_id}")
                 return
             try:
                 await channel.connect()
-                queues[guild_id] = _new_queue()
-                read_channels[guild_id] = text_channel_id
+                _ensure_session_memory()
                 logger.info(f"VC復旧成功 guild={guild_id} channel={voice_channel_id}")
                 return
             except Exception as e:
