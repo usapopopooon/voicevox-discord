@@ -490,6 +490,29 @@ class TestReadingCorrections:
         # 複数記号が混在しても順次置換される
         assert apply_reading_corrections("3㌖と500㍉") == "3キロメートルと500ミリ"
 
+    def test_scitech_medical_terms_have_correct_readings(self):
+        """誤読されやすい科学/数学/工学/医学用語が正しく読まれる"""
+        from bot import apply_reading_corrections
+
+        # 数学: 行列を「こうれつ」と誤読しない
+        assert apply_reading_corrections("行列を計算") == "ぎょうれつを計算"
+        # 統計: 尤度
+        assert apply_reading_corrections("最尤推定") == "さいゆうすいてい"
+        # 化学: 直鎖を「ちょくくさり」と誤読しない
+        assert apply_reading_corrections("直鎖アルカン") == "ちょくさアルカン"
+        # 天文: 緯度
+        assert apply_reading_corrections("緯度経度") == "いどけいど"
+        # 医学: 嚥下を「えんか」と誤読しない
+        assert apply_reading_corrections("嚥下障害") == "えんげしょうがい"
+        # 医学: 増悪を「ぞうお」と誤読しない
+        assert apply_reading_corrections("症状が増悪") == "症状がぞうあく"
+        # 医学: 外科を「がいか」と誤読しない
+        assert apply_reading_corrections("外科手術") == "げか手術"
+        # 医学: 浮腫を「うきはれ」と誤読しない
+        assert apply_reading_corrections("浮腫がある") == "ふしゅがある"
+        # 物理: 摂動
+        assert apply_reading_corrections("摂動論") == "せつどう論"
+
     def test_cjk_compat_latin_unit_symbols_get_kana_readings(self):
         """Latin 分解される単位記号は手書きマップでカナ展開される"""
         from bot import apply_reading_corrections
