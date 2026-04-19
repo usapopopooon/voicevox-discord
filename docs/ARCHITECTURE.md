@@ -214,6 +214,8 @@ Discord互換WAVなら PCMAudio で直接再生
 - Bot再接続時にキューが残っていれば再生を自動再開
 - TTS接続エラー通知はギルド単位でレート制限
 - Discord API 503 などログイン失敗時は指数バックオフで再試行
+- トークン無効化（`LoginFailure` / WebSocket close 4004）検知時は永続的失敗として扱い、`TOKEN_INVALID_BACKOFF_SECONDS`（既定300秒）待機してから exit する。コンテナ即再起動による fast restart loop を緩和し、ログ汚染とクォータ消費を抑える。Discord Developer Portal でトークン再生成 → 環境変数更新 → redeploy が必要
+- 複数Botモードで `DISCORD_TOKENS` 内の1トークンのみ無効化された場合、その子プロセスは300秒間隔でクラッシュ→再起動を繰り返すが、親のクラッシュループ検出（300秒に5回）には到達しないため他の正常な子プロセスは影響を受けず動作継続する
 
 ## 環境変数
 

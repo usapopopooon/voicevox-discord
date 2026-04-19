@@ -2615,11 +2615,14 @@ MAX_LOGIN_RETRIES = 5
 TOKEN_INVALID_BACKOFF_SECONDS = 300
 
 
-def _sleep_and_raise_token_invalid(error_msg: str) -> None:
-    """トークン無効と判定したら長めに sleep してから raise。
-    コンテナ即再起動による fast restart loop を緩和する。"""
+def _log_and_backoff_for_token_invalid(error_msg: str) -> None:
+    """トークン無効と判定したら警告ログを出してから長めに sleep する。
+
+    呼び出し側で raise を続けることで、コンテナ即再起動による fast
+    restart loop を緩和する（exit 自体は呼び出し側の bare raise で行う）。
+    """
     logger.error(
-        f"{error_msg} — DISCORD_TOKEN を確認してください "
+        f"{error_msg} — DISCORD_TOKEN または DISCORD_TOKENS を確認してください "
         f"（Discord Developer Portal で再生成 → 環境変数を更新 → redeploy）"
         f" / {TOKEN_INVALID_BACKOFF_SECONDS}秒待機して exit します"
     )
@@ -2637,11 +2640,11 @@ def _run_single_bot(discord_token: str):
             client.run(discord_token)
             break
         except discord.LoginFailure as e:
-            _sleep_and_raise_token_invalid(f"Discordログイン失敗: {e}")
+            _log_and_backoff_for_token_invalid(f"Discordログイン失敗: {e}")
             raise
         except discord.ConnectionClosed as e:
             if getattr(e, "code", None) == 4004:
-                _sleep_and_raise_token_invalid(
+                _log_and_backoff_for_token_invalid(
                     f"Discord認証失敗 (4004): セッション中にトークン無効化 ({e})"
                 )
             raise
