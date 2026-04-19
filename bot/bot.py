@@ -223,6 +223,21 @@ def _cleanup_guild_state(guild_id: int) -> None:
     engine_error_notified_at.pop(guild_id, None)
 
 
+def _cleanup_guild_playback_state(guild_id: int) -> None:
+    """一時的な VC 切断時用の部分クリーンアップ。
+
+    Discord WS 4006 等で discord.py が auto-reconnect する場面で呼ばれる。
+    `read_channels` は意図的に保持し、再接続後に on_message が引き続き
+    読み上げ対象として認識できるようにする。queue/locks は再生コンテキスト
+    なので破棄。
+    """
+    queues.pop(guild_id, None)
+    play_locks.pop(guild_id, None)
+    synth_order_locks.pop(guild_id, None)
+    engine_error_notified_at.pop(guild_id, None)
+    # read_channels は保持
+
+
 def _can_start_playback(vc: discord.VoiceClient) -> bool:
     """再生開始可能な VC 状態かを安全に判定する。
 
@@ -2277,11 +2292,13 @@ async def on_voice_state_update(
 
         guild_id = member.guild.id
         if after.channel is None:
-            # Bot 自身の切断 → ギルド状態をクリーンアップ
-            # 自動復帰はモデレータ手動切断/権限剥奪等で false positive が起きるため
-            # 行わない。短時間ネットワーク断は discord.py の reconnect が処理。
-            # デプロイ・プロセス再起動の復旧は on_ready 起動時 restore に任せる。
-            _cleanup_guild_state(guild_id)
+            # Bot 自身の切断 → 一時的な切断 (Discord WS 4006 等) に備えて
+            # `read_channels` は保持し、queue/locks など再生コンテキストのみ破棄。
+            # discord.py の auto-reconnect が成功すれば on_message で読み上げが
+            # 継続できる。/leave 等の真の終了では呼び出し側が前後で
+            # `_cleanup_guild_state` を呼んで `read_channels` も最終的に削除する
+            # ため、ここで保持しても安全（最終状態は全クリア）。
+            _cleanup_guild_playback_state(guild_id)
         else:
             # Bot 自身の再接続 → 残キューがあれば再生再開
             vc = member.guild.voice_client

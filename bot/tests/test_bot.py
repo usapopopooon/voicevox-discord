@@ -2572,7 +2572,12 @@ class TestOnVoiceStateUpdate:
             read_channels.pop(5010, None)
             play_locks.pop(5010, None)
 
-    async def test_bot_disconnect_cleans_guild_state(self):
+    async def test_bot_disconnect_cleans_playback_state_but_preserves_read_channels(
+        self,
+    ):
+        """一時切断 (Discord WS 4006 等) で discord.py が auto-reconnect する
+        ケースに備え、`read_channels` は保持し queue/locks のみクリアする。
+        """
         from bot import (
             client,
             engine_error_notified_at,
@@ -2600,10 +2605,12 @@ class TestOnVoiceStateUpdate:
         engine_error_notified_at[5005] = 1.0
         try:
             await on_voice_state_update(member, before, after)
+            # 再生コンテキストはクリア
             assert 5005 not in queues
-            assert 5005 not in read_channels
             assert 5005 not in play_locks
             assert 5005 not in engine_error_notified_at
+            # read_channels は保持 (auto-reconnect 後の TTS 継続用)
+            assert read_channels[5005] == 100
         finally:
             client._connection.user = original_user
             queues.pop(5005, None)
@@ -4585,3 +4592,52 @@ class TestDictAddModalRejectsDuplicate:
             assert "テスト語" not in bot.guild_dicts.get(8701, {})
         finally:
             bot.guild_dicts.pop(8701, None)
+
+
+class TestCleanupGuildPlaybackState:
+    """一時切断 (Discord WS 4006 等) 時の部分クリーンアップ"""
+
+    def test_preserves_read_channels(self):
+        """read_channels は保持される (auto-reconnect 後の TTS 継続用)"""
+        import bot
+
+        bot.queues[9101] = deque([b"audio"])
+        bot.read_channels[9101] = 555
+        try:
+            bot._cleanup_guild_playback_state(9101)
+            assert 9101 not in bot.queues
+            # read_channels は保持
+            assert bot.read_channels[9101] == 555
+        finally:
+            bot.queues.pop(9101, None)
+            bot.read_channels.pop(9101, None)
+
+    def test_clears_locks_and_notification_state(self):
+        """play_locks / synth_order_locks / engine_error_notified_at は破棄"""
+        import asyncio
+
+        import bot
+
+        bot.play_locks[9102] = asyncio.Lock()
+        bot.synth_order_locks[9102] = asyncio.Lock()
+        bot.engine_error_notified_at[9102] = 123.0
+        try:
+            bot._cleanup_guild_playback_state(9102)
+            assert 9102 not in bot.play_locks
+            assert 9102 not in bot.synth_order_locks
+            assert 9102 not in bot.engine_error_notified_at
+        finally:
+            bot.play_locks.pop(9102, None)
+            bot.synth_order_locks.pop(9102, None)
+            bot.engine_error_notified_at.pop(9102, None)
+
+    def test_full_cleanup_still_clears_read_channels(self):
+        """_cleanup_guild_state (フル版) は read_channels も含めて全クリア"""
+        import bot
+
+        bot.read_channels[9103] = 777
+        try:
+            bot._cleanup_guild_state(9103)
+            assert 9103 not in bot.read_channels
+        finally:
+            bot.read_channels.pop(9103, None)
