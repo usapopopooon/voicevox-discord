@@ -3,12 +3,14 @@ import io
 import logging
 import os
 import re
+import signal
 import subprocess
+import sys
 import time
 import unicodedata
 import wave
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import aiohttp
 import asyncpg
@@ -35,18 +37,80 @@ load_dotenv()
 # ログ設定（本番では LOG_LEVEL=WARNING 等でログ量を絞ってストレージ課金を節約）
 _LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
-logging.basicConfig(
-    level=_LOG_LEVEL,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+# 複数Botモードで子プロセスのログを区別するためのインスタンス番号（"1" が単一/親）
+_LOG_INSTANCE_INDEX = os.getenv("BOT_INSTANCE_INDEX", "1")
+_LOG_FORMAT = (
+    f"%(asctime)s [%(levelname)s] [bot#{_LOG_INSTANCE_INDEX}] %(name)s: %(message)s"
 )
+logging.basicConfig(level=_LOG_LEVEL, format=_LOG_FORMAT)
 logger = logging.getLogger(__name__)
 if _LOG_LEVEL_NAME not in logging._nameToLevel:
     logger.warning(f"LOG_LEVEL='{_LOG_LEVEL_NAME}' は未知のため INFO にフォールバック")
 
 # 設定（環境変数で切り替え）
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
+DISCORD_TOKENS_RAW = os.getenv("DISCORD_TOKENS", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DEFAULT_SPEAKER = int(os.getenv("DEFAULT_SPEAKER_ID", "3"))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """真偽値の環境変数を解釈する。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_discord_token(token: str) -> str:
+    """トークン文字列の表記ゆれを吸収する（空白・囲み引用符）。"""
+    normalized = token.strip()
+    if (
+        len(normalized) >= 2
+        and normalized[0] == normalized[-1]
+        and normalized[0] in {'"', "'"}
+    ):
+        normalized = normalized[1:-1].strip()
+    return normalized
+
+
+def _resolve_discord_tokens() -> list[str]:
+    """DISCORD_TOKENS / DISCORD_TOKEN から起動対象トークン一覧を作る。"""
+    tokens: list[str] = []
+    if DISCORD_TOKENS_RAW.strip():
+        # 全角カンマ混在を許容
+        token_source = DISCORD_TOKENS_RAW.replace("，", ",")
+        tokens.extend(
+            token for token in re.split(r"[\s,]+", token_source.strip()) if token
+        )
+    if DISCORD_TOKEN.strip():
+        tokens.append(DISCORD_TOKEN.strip())
+
+    unique_tokens: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        normalized = _normalize_discord_token(token)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_tokens.append(normalized)
+    return unique_tokens
+
+
+RUN_DB_MIGRATIONS = _env_flag("RUN_DB_MIGRATIONS", default=True)
+IS_MULTIBOT_CHILD = _env_flag("MULTIBOT_CHILD", default=False)
+BOT_INSTANCE_INDEX = _LOG_INSTANCE_INDEX
+_migrations_ran = False
+
+# 複数Bot時は1Postgresへ N台ぶん接続するため、環境変数で個別に絞れるようにする
+DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "5"))
+
+# 子プロセスの自動再起動（指数バックオフ + クラッシュループ検出）
+BOT_RESTART_BACKOFF_MAX_SECONDS = 60
+BOT_CRASH_WINDOW_SECONDS = 300
+BOT_CRASH_THRESHOLD = 5
+BOT_POLL_INTERVAL_SECONDS = 2
 
 # 各エンジンの定義（名前, 環境変数, デフォルトURL, IDオフセット）
 # IDオフセットでエンジン間のスピーカーID衝突を回避
@@ -910,9 +974,12 @@ async def init_db():
 
         for attempt in range(5):
             try:
-                # 小規模 Bot 向けに接続数を絞ってメモリ節約（各接続 ~1-2MB）
+                # 小規模 Bot 向けに接続数を絞ってメモリ節約（各接続 ~1-2MB）。
+                # 複数Bot時は DB_POOL_MAX_SIZE を下げて Postgres 接続数の総量を抑える。
                 db_pool = await asyncpg.create_pool(
-                    DATABASE_URL, min_size=1, max_size=5
+                    DATABASE_URL,
+                    min_size=DB_POOL_MIN_SIZE,
+                    max_size=DB_POOL_MAX_SIZE,
                 )
                 break
             except (OSError, asyncpg.PostgresError) as e:
@@ -1744,7 +1811,10 @@ class DictDeleteModal(ui.Modal, title="辞書から削除"):
 
 @client.event
 async def on_ready():
-    await migration_runner.run_pending_migrations(DATABASE_URL, logger=logger)
+    global _migrations_ran
+    if RUN_DB_MIGRATIONS and not _migrations_ran:
+        await migration_runner.run_pending_migrations(DATABASE_URL, logger=logger)
+        _migrations_ran = True
     await init_db()
     await load_builtin_reading_dicts()
     await load_user_settings()
@@ -2306,9 +2376,162 @@ async def on_message(message: discord.Message):
 MAX_LOGIN_RETRIES = 5
 
 
+def _run_single_bot(discord_token: str):
+    """単一トークンでBotを起動（Discord API障害時は指数バックオフで再試行）。"""
+    for attempt in range(MAX_LOGIN_RETRIES):
+        try:
+            client.run(discord_token)
+            break
+        except discord.DiscordServerError as e:
+            if attempt == MAX_LOGIN_RETRIES - 1:
+                logger.error(f"最大リトライ回数到達、諦めます: {e}")
+                raise
+            wait = 5 * (2**attempt)
+            logger.warning(
+                f"Discord API一時障害 ({attempt + 1}/{MAX_LOGIN_RETRIES}): {e}"
+                f" → {wait}秒待機して再試行"
+            )
+            time.sleep(wait)
+
+
+def _terminate_processes(processes: list[subprocess.Popen]) -> None:
+    """全Bot子プロセスを停止する（SIGTERM → 10秒待機 → SIGKILL）。"""
+    for proc in processes:
+        if proc.poll() is None:
+            proc.terminate()
+    for proc in processes:
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+@dataclass
+class _ChildBotSlot:
+    instance: int
+    token: str
+    process: subprocess.Popen
+    # 直近の終了時刻（クラッシュループ判定用）
+    failure_times: deque[float] = field(default_factory=deque)
+    # 次回の再起動時刻（time.monotonic 基準）。0.0 = 再起動待ち無し
+    next_restart_at: float = 0.0
+
+
+def _spawn_child_bot(token: str, instance: int, script_path: str) -> subprocess.Popen:
+    """子Botプロセスを起動する。"""
+    child_env = os.environ.copy()
+    child_env["DISCORD_TOKEN"] = token
+    child_env["DISCORD_TOKENS"] = ""
+    child_env["MULTIBOT_CHILD"] = "1"
+    child_env["BOT_INSTANCE_INDEX"] = str(instance)
+    # 親プロセスで事前に実行済みのため、子側はマイグレーションを行わない
+    child_env["RUN_DB_MIGRATIONS"] = "0"
+    proc = subprocess.Popen([sys.executable, script_path], env=child_env)
+    logger.info(f"Botプロセス起動: instance={instance}, pid={proc.pid}")
+    return proc
+
+
+def _run_multi_bots(discord_tokens: list[str]) -> None:
+    """複数トークンを子プロセスとして並列起動し、落ちたら自動再起動する。
+
+    各 slot の backoff sleep を統合し、最も近い再起動時刻まで一括で待機することで
+    複数Bot同時クラッシュ時も復旧時間が線形に伸びないようにしている。
+    クラッシュループ（BOT_CRASH_WINDOW_SECONDS 内に BOT_CRASH_THRESHOLD 回終了）
+    を検知したら親も停止して、コンテナレベルのオートヒールに委ねる（fail-fast）。
+    """
+    script_path = os.path.abspath(__file__)
+    slots: list[_ChildBotSlot] = []
+    shutdown_requested = False
+    logger.info(f"複数Botモードで起動: {len(discord_tokens)}プロセス")
+
+    def _shutdown(_signum, _frame):
+        # docker stop / Railway shutdown の SIGTERM を KeyboardInterrupt 経路に集約
+        nonlocal shutdown_requested
+        shutdown_requested = True
+        raise KeyboardInterrupt
+
+    previous_sigterm = signal.signal(signal.SIGTERM, _shutdown)
+    try:
+        for idx, token in enumerate(discord_tokens, start=1):
+            slots.append(
+                _ChildBotSlot(
+                    instance=idx,
+                    token=token,
+                    process=_spawn_child_bot(token, idx, script_path),
+                )
+            )
+
+        while not shutdown_requested:
+            now = time.monotonic()
+
+            # 1. 期限到来済みの slot を一括 spawn（並列復旧）
+            for slot in slots:
+                if shutdown_requested:
+                    break
+                if slot.next_restart_at and now >= slot.next_restart_at:
+                    slot.process = _spawn_child_bot(
+                        slot.token, slot.instance, script_path
+                    )
+                    slot.next_restart_at = 0.0
+
+            # 2. 動作中 slot を poll → 終了検知 → backoff 計算
+            for slot in slots:
+                if slot.next_restart_at:
+                    continue  # 再起動待ち中
+                code = slot.process.poll()
+                if code is None:
+                    continue
+                # クラッシュ履歴を更新（時間窓外は捨てる）
+                slot.failure_times.append(now)
+                while (
+                    slot.failure_times
+                    and now - slot.failure_times[0] > BOT_CRASH_WINDOW_SECONDS
+                ):
+                    slot.failure_times.popleft()
+                if len(slot.failure_times) >= BOT_CRASH_THRESHOLD:
+                    raise RuntimeError(
+                        f"クラッシュループ検出 instance={slot.instance}: "
+                        f"{BOT_CRASH_WINDOW_SECONDS}秒に"
+                        f"{len(slot.failure_times)}回終了 (last_exit={code})"
+                    )
+                # 指数バックオフ（1, 2, 4, 8, 16秒、上限 60秒）
+                backoff = min(
+                    2 ** (len(slot.failure_times) - 1),
+                    BOT_RESTART_BACKOFF_MAX_SECONDS,
+                )
+                slot.next_restart_at = now + backoff
+                logger.warning(
+                    f"Botプロセス終了 instance={slot.instance} "
+                    f"pid={slot.process.pid} exit={code} "
+                    f"→ {backoff}秒後に再起動 "
+                    f"(直近終了 {len(slot.failure_times)}/{BOT_CRASH_THRESHOLD})"
+                )
+
+            # 3. 次のイベント時刻まで待機（最も近い再起動 or poll間隔の小さい方）
+            pending = [s.next_restart_at for s in slots if s.next_restart_at]
+            if pending:
+                sleep_for = min(
+                    BOT_POLL_INTERVAL_SECONDS,
+                    max(0.0, min(pending) - time.monotonic()),
+                )
+            else:
+                sleep_for = BOT_POLL_INTERVAL_SECONDS
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+    except KeyboardInterrupt:
+        logger.info("終了シグナルを受信、全Botプロセスを停止します")
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        _terminate_processes([slot.process for slot in slots])
+
+
 if __name__ == "__main__":
-    if not DISCORD_TOKEN:
-        raise RuntimeError("DISCORD_TOKEN environment variable is required")
+    tokens = _resolve_discord_tokens()
+    if not tokens:
+        raise RuntimeError(
+            "DISCORD_TOKEN または DISCORD_TOKENS environment variable が必要です"
+        )
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL environment variable is required")
     if not ENGINES:
@@ -2324,17 +2547,15 @@ if __name__ == "__main__":
     except ImportError:
         logger.info("uvloop 未インストール、標準 asyncio ループで起動")
 
-    for attempt in range(MAX_LOGIN_RETRIES):
-        try:
-            client.run(DISCORD_TOKEN)
-            break
-        except discord.DiscordServerError as e:
-            if attempt == MAX_LOGIN_RETRIES - 1:
-                logger.error(f"最大リトライ回数到達、諦めます: {e}")
-                raise
-            wait = 5 * (2**attempt)
-            logger.warning(
-                f"Discord API一時障害 ({attempt + 1}/{MAX_LOGIN_RETRIES}): {e}"
-                f" → {wait}秒待機して再試行"
-            )
-            time.sleep(wait)
+    logger.info(
+        f"起動モード: {'child' if IS_MULTIBOT_CHILD else 'single'}, "
+        f"instance={BOT_INSTANCE_INDEX}, tokens={len(tokens)}"
+    )
+    if len(tokens) > 1 and not IS_MULTIBOT_CHILD:
+        logger.info("複数Botモードの事前処理としてDBマイグレーションを実行します")
+        asyncio.run(
+            migration_runner.run_pending_migrations(DATABASE_URL, logger=logger)
+        )
+        _run_multi_bots(tokens)
+    else:
+        _run_single_bot(tokens[0])

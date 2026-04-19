@@ -34,8 +34,30 @@ Discord のテキストチャンネルのメッセージを VOICEVOX の音声�
 
 ```bash
 cp .env.example .env
-# .env に DISCORD_TOKEN を記入
+# .env に DISCORD_TOKEN（または DISCORD_TOKENS）を記入
 docker compose up
+```
+
+### 複数Bot起動
+
+- 単一Bot: `DISCORD_TOKEN=<token>`
+- 複数Bot: `DISCORD_TOKENS=<token1>,<token2>,...`
+- 複数運用時は `DISCORD_TOKEN` を空にして `DISCORD_TOKENS` のみ設定
+- 両方指定した場合は両方のトークンが起動対象になります（重複は自動除外）
+
+複数Botモードでは Bot プロセスをトークン数ぶん自動起動します。  
+DB マイグレーションは親プロセスで1回だけ実行されます。  
+SIGTERM/SIGINT 受信時は親が全子プロセスへ SIGTERM を伝播し、10秒以内に終了しなければ SIGKILL します。
+
+`.env` 設定例:
+
+```env
+# 単一Bot
+DISCORD_TOKEN=token1
+
+# 複数Bot
+# DISCORD_TOKEN=
+# DISCORD_TOKENS=token1,token2,token3
 ```
 
 ## Railway デプロイ
@@ -46,7 +68,7 @@ docker compose up
    - Internal Networking を有効化
 4. Bot サービスを追加（GitHub リポジトリ連携、Root Directory: `bot/`）
 5. Bot の環境変数を設定:
-   - `DISCORD_TOKEN` — Discord Developer Portal から取得
+   - `DISCORD_TOKEN` または `DISCORD_TOKENS` — Discord Developer Portal から取得
    - `VOICEVOX_URL` — `http://<voicevoxサービス名>.railway.internal:50021`
    - `DATABASE_URL` — PostgreSQL プラグインから自動注入
 

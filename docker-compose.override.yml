@@ -16,6 +16,7 @@ services:
       dockerfile: Dockerfile.dev
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN}
+      DISCORD_TOKENS: ${DISCORD_TOKENS}
       DATABASE_URL: postgresql://bot:bot@postgres:5432/voicevox_bot
     env_file:
       - .env

@@ -1,4 +1,6 @@
 import re
+import signal
+import subprocess
 from collections import deque
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -120,6 +122,293 @@ class TestVoiceSettings:
         s = get_user_settings(999, 555)
         assert s.speed == 1.7
         user_settings.pop((0, 555), None)
+
+
+class TestResolveDiscordTokens:
+    def test_normalizes_and_deduplicates_tokens(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(
+            bot,
+            "DISCORD_TOKENS_RAW",
+            ' token-a, "token-b"，\'token-a\'\n"token-b" ',
+        )
+        monkeypatch.setattr(bot, "DISCORD_TOKEN", " token-a ")
+        assert bot._resolve_discord_tokens() == ["token-a", "token-b"]
+
+    def test_ignores_empty_tokens_after_normalization(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(bot, "DISCORD_TOKENS_RAW", " , \"\", '' , token-a, , ")
+        monkeypatch.setattr(bot, "DISCORD_TOKEN", ' "  " ')
+        assert bot._resolve_discord_tokens() == ["token-a"]
+
+    def test_preserves_order_and_deduplicates_across_sources(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(bot, "DISCORD_TOKENS_RAW", "token-b, token-a")
+        monkeypatch.setattr(bot, "DISCORD_TOKEN", " 'token-b' ")
+        assert bot._resolve_discord_tokens() == ["token-b", "token-a"]
+
+    def test_uses_single_discord_token_when_tokens_is_empty(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(bot, "DISCORD_TOKENS_RAW", "")
+        monkeypatch.setattr(bot, "DISCORD_TOKEN", ' "token-only" ')
+        assert bot._resolve_discord_tokens() == ["token-only"]
+
+
+def _make_proc_mock(poll_return=None, pid=1000) -> MagicMock:
+    proc = MagicMock()
+    proc.poll = MagicMock(return_value=poll_return)
+    proc.pid = pid
+    return proc
+
+
+class TestTerminateProcesses:
+    def test_skips_already_finished_process(self):
+        import bot
+
+        proc = _make_proc_mock(poll_return=0)
+        bot._terminate_processes([proc])
+        proc.terminate.assert_not_called()
+        proc.wait.assert_not_called()
+        proc.kill.assert_not_called()
+
+    def test_terminates_running_process(self):
+        import bot
+
+        proc = _make_proc_mock(poll_return=None)
+        proc.wait = MagicMock(return_value=0)
+        bot._terminate_processes([proc])
+        proc.terminate.assert_called_once()
+        proc.wait.assert_called_once_with(timeout=10)
+        proc.kill.assert_not_called()
+
+    def test_kills_when_terminate_times_out(self):
+        import bot
+
+        proc = _make_proc_mock(poll_return=None)
+        proc.wait = MagicMock(
+            side_effect=subprocess.TimeoutExpired(cmd="bot", timeout=10)
+        )
+        bot._terminate_processes([proc])
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+
+
+class TestRunMultiBots:
+    def test_restarts_failed_child_with_backoff(self, monkeypatch):
+        """子が落ちたら新しい子プロセスを起動する（指数バックオフ）。"""
+        import bot
+
+        proc_failed = _make_proc_mock(poll_return=1, pid=1001)
+        proc_alive = _make_proc_mock(poll_return=None, pid=1002)
+        proc_alive.wait = MagicMock(return_value=0)
+
+        popen = MagicMock(side_effect=[proc_failed, proc_alive])
+        monkeypatch.setattr(bot.subprocess, "Popen", popen)
+
+        # 仮想クロックを time.sleep に応じて進める（next_restart_at 判定のため）
+        clock = [0.0]
+        sleeps: list[float] = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+            if len(sleeps) >= 3:
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(bot.time, "sleep", MagicMock(side_effect=fake_sleep))
+        monkeypatch.setattr(
+            bot.time, "monotonic", MagicMock(side_effect=lambda: clock[0])
+        )
+
+        bot._run_multi_bots(["token-a"])
+
+        # Popen が 2 回 = 元の起動 + 再起動
+        assert popen.call_count == 2
+        # 1回目の sleep は backoff (~1秒) で poll interval (2秒) より短いはず
+        assert sleeps[0] < bot.BOT_POLL_INTERVAL_SECONDS
+        proc_alive.terminate.assert_called_once()
+
+    def test_parallel_restart_does_not_serialize_backoff(self, monkeypatch):
+        """複数Bot同時クラッシュ時は backoff を統合し並列に再起動する。"""
+        import bot
+
+        proc_failed_a = _make_proc_mock(poll_return=1, pid=1001)
+        proc_failed_b = _make_proc_mock(poll_return=1, pid=1002)
+        proc_alive_a = _make_proc_mock(poll_return=None, pid=1003)
+        proc_alive_b = _make_proc_mock(poll_return=None, pid=1004)
+        for p in (proc_alive_a, proc_alive_b):
+            p.wait = MagicMock(return_value=0)
+
+        popen = MagicMock(
+            side_effect=[proc_failed_a, proc_failed_b, proc_alive_a, proc_alive_b]
+        )
+        monkeypatch.setattr(bot.subprocess, "Popen", popen)
+
+        clock = [0.0]
+        sleeps: list[float] = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+            if len(sleeps) >= 3:
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(bot.time, "sleep", MagicMock(side_effect=fake_sleep))
+        monkeypatch.setattr(
+            bot.time, "monotonic", MagicMock(side_effect=lambda: clock[0])
+        )
+
+        bot._run_multi_bots(["token-a", "token-b"])
+
+        # 初期2台 + 再起動2台 = 4 回。直列なら backoff sleep が2回必要だが
+        # 並列再起動なら 1 回の backoff sleep で両方再起動される
+        assert popen.call_count == 4
+        backoff_sleeps = [s for s in sleeps if 0 < s < bot.BOT_POLL_INTERVAL_SECONDS]
+        assert len(backoff_sleeps) == 1
+
+    def test_detects_crash_loop_and_raises(self, monkeypatch):
+        """短時間に閾値以上クラッシュしたら RuntimeError でオートヒールへ委譲。"""
+        import bot
+
+        def make_failing_proc(*_args, **_kwargs):
+            proc = _make_proc_mock(poll_return=1, pid=2000)
+            proc.wait = MagicMock(return_value=1)
+            return proc
+
+        monkeypatch.setattr(
+            bot.subprocess, "Popen", MagicMock(side_effect=make_failing_proc)
+        )
+        # 仮想クロックで sleep を瞬時化しつつ next_restart_at 判定を成立させる
+        clock = [0.0]
+
+        def fake_sleep(seconds):
+            clock[0] += seconds
+
+        monkeypatch.setattr(bot.time, "sleep", MagicMock(side_effect=fake_sleep))
+        monkeypatch.setattr(
+            bot.time, "monotonic", MagicMock(side_effect=lambda: clock[0])
+        )
+
+        with pytest.raises(RuntimeError, match="クラッシュループ"):
+            bot._run_multi_bots(["token-a"])
+
+    def test_does_not_restart_after_shutdown_request(self, monkeypatch):
+        """子終了→backoff sleep 中の shutdown → 再起動しない。"""
+        import bot
+
+        proc = _make_proc_mock(poll_return=1, pid=1001)
+        proc.wait = MagicMock(return_value=1)
+        popen = MagicMock(return_value=proc)
+        monkeypatch.setattr(bot.subprocess, "Popen", popen)
+        monkeypatch.setattr(bot.time, "sleep", MagicMock(side_effect=KeyboardInterrupt))
+
+        bot._run_multi_bots(["token-a"])
+
+        # 元の起動のみで再起動なし
+        assert popen.call_count == 1
+
+    def test_terminates_all_on_keyboard_interrupt(self, monkeypatch):
+        """SIGINT/SIGTERM 受信時は全子プロセスを停止する。"""
+        import bot
+
+        proc1 = _make_proc_mock(poll_return=None, pid=1001)
+        proc2 = _make_proc_mock(poll_return=None, pid=1002)
+        for proc in (proc1, proc2):
+            proc.wait = MagicMock(return_value=0)
+
+        monkeypatch.setattr(
+            bot.subprocess, "Popen", MagicMock(side_effect=[proc1, proc2])
+        )
+        monkeypatch.setattr(bot.time, "sleep", MagicMock(side_effect=KeyboardInterrupt))
+
+        bot._run_multi_bots(["token-a", "token-b"])  # KeyboardInterrupt は内部で吸収
+
+        proc1.terminate.assert_called_once()
+        proc2.terminate.assert_called_once()
+
+    def test_restores_sigterm_handler(self, monkeypatch):
+        """SIGTERM ハンドラは終了時に必ず元に戻す。"""
+        import bot
+
+        proc = _make_proc_mock(poll_return=None, pid=1001)
+        proc.wait = MagicMock(return_value=0)
+
+        monkeypatch.setattr(bot.subprocess, "Popen", MagicMock(return_value=proc))
+        monkeypatch.setattr(bot.time, "sleep", MagicMock(side_effect=KeyboardInterrupt))
+
+        before = signal.getsignal(signal.SIGTERM)
+        bot._run_multi_bots(["token-only"])
+        assert signal.getsignal(signal.SIGTERM) == before
+
+    def test_passes_child_env_vars(self, monkeypatch):
+        """子プロセスへ渡す環境変数（マイグレーション抑止・child フラグ）の検証。"""
+        import bot
+
+        proc = _make_proc_mock(poll_return=None, pid=1001)
+        proc.wait = MagicMock(return_value=0)
+        popen = MagicMock(return_value=proc)
+        monkeypatch.setattr(bot.subprocess, "Popen", popen)
+        monkeypatch.setattr(bot.time, "sleep", MagicMock(side_effect=KeyboardInterrupt))
+
+        bot._run_multi_bots(["token-a"])
+
+        env = popen.call_args.kwargs["env"]
+        assert env["DISCORD_TOKEN"] == "token-a"
+        assert env["DISCORD_TOKENS"] == ""
+        assert env["MULTIBOT_CHILD"] == "1"
+        assert env["RUN_DB_MIGRATIONS"] == "0"
+        assert env["BOT_INSTANCE_INDEX"] == "1"
+
+
+@pytest.fixture
+def mock_on_ready_deps(monkeypatch):
+    """on_ready 内で呼ばれる重い処理を全てモックし、migration_runner mock を返す。"""
+    import bot
+
+    run_mock = AsyncMock()
+    monkeypatch.setattr(bot.migration_runner, "run_pending_migrations", run_mock)
+    monkeypatch.setattr(bot, "init_db", AsyncMock())
+    monkeypatch.setattr(bot, "load_builtin_reading_dicts", AsyncMock())
+    monkeypatch.setattr(bot, "load_user_settings", AsyncMock())
+    monkeypatch.setattr(bot, "load_guild_dicts", AsyncMock())
+    monkeypatch.setattr(bot, "load_guild_mutes", AsyncMock())
+    monkeypatch.setattr(bot, "fetch_speakers", AsyncMock())
+
+    tree_mock = MagicMock()
+    tree_mock.sync = AsyncMock()
+    monkeypatch.setattr(bot, "tree", tree_mock)
+
+    client_mock = MagicMock()
+    client_mock.user.id = 1
+    monkeypatch.setattr(bot, "client", client_mock)
+
+    monkeypatch.setattr(bot, "_migrations_ran", False)
+    return run_mock
+
+
+class TestOnReadyMigrationFlag:
+    async def test_skips_migrations_when_disabled(
+        self, mock_on_ready_deps, monkeypatch
+    ):
+        import bot
+
+        monkeypatch.setattr(bot, "RUN_DB_MIGRATIONS", False)
+        await bot.on_ready()
+        mock_on_ready_deps.assert_not_called()
+
+    async def test_runs_migrations_only_once_across_reconnects(
+        self, mock_on_ready_deps, monkeypatch
+    ):
+        import bot
+
+        monkeypatch.setattr(bot, "RUN_DB_MIGRATIONS", True)
+        await bot.on_ready()
+        await bot.on_ready()
+        mock_on_ready_deps.assert_called_once()
 
 
 class TestPlayNext:

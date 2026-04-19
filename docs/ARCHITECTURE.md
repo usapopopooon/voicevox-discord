@@ -151,11 +151,18 @@ CREATE TABLE schema_migrations (
 
 `on_ready` では以下の順で初期化を実施する。
 
-1. `migrate.py` で未適用マイグレーションを実行（`schema_migrations` 管理）
+1. （`RUN_DB_MIGRATIONS=1` の時のみ）`migrate.py` で未適用マイグレーションを実行（`schema_migrations` 管理）
 2. `init_db` で必要テーブルを保証
 3. `load_builtin_reading_dicts` で built-in 辞書を DB + デフォルトから再構築
 4. ユーザー設定・ギルド辞書・ミュートをメモリへロード
 5. スラッシュコマンド同期・スピーカー取得
+
+複数Botモード（`DISCORD_TOKENS`）では、親プロセスがマイグレーションを1回実行してから子プロセスを起動する。
+親は子プロセスを監視し、終了を検知すると指数バックオフ（1→2→4→8→16秒、上限60秒）で再起動する。
+複数Bot同時クラッシュ時は各 slot の backoff 期限を統合し、最も近い期限まで一括 sleep する設計のため、復旧時間が台数に対して線形に伸びない。
+5分以内に5回終了したインスタンスはクラッシュループとして親も停止（fail-fast）し、コンテナレベルのオートヒール（`restart: unless-stopped` 等）に委ねる。
+SIGTERM/SIGINT 受信時は再起動を抑制し、全子プロセスへ SIGTERM を伝播する（10秒以内に終了しなければ SIGKILL）。
+ログには `[bot#<index>]` を付与してインスタンスを識別できる。
 
 ## 音声合成フロー
 
@@ -192,18 +199,24 @@ Discord互換WAVなら PCMAudio で直接再生
 
 | 変数 | 説明 | デフォルト |
 |---|---|---|
-| `DISCORD_TOKEN` | Discord Bot トークン (必須) | - |
+| `DISCORD_TOKEN` | 単一Bot起動時の Discord Bot トークン | - |
+| `DISCORD_TOKENS` | 複数Bot起動時の Discord Bot トークン群（カンマ/改行区切り） | - |
 | `VOICEVOX_URL` | VOICEVOX Engine の URL | `http://localhost:50021` |
 | `COEIROINK_URL` | COEIROINK Engine の URL（省略可） | - |
 | `SHAREVOX_URL` | SHAREVOX Engine の URL（省略可） | - |
 | `DEFAULT_SPEAKER_ID` | デフォルト Speaker ID | `3` |
 | `DATABASE_URL` | PostgreSQL 接続 URL | - |
+| `LOG_LEVEL` | ログレベル | `INFO` |
+| `DB_POOL_MIN_SIZE` / `DB_POOL_MAX_SIZE` | asyncpg コネクションプールサイズ（複数Bot時は max を絞ること） | `1` / `5` |
+| `BOT_INSTANCE_INDEX` | （内部用）ログ識別子。複数Bot時は親が子へ自動付与 | `1` |
+| `MULTIBOT_CHILD` | （内部用）子プロセス判定フラグ。親が `1` を渡す | `0` |
+| `RUN_DB_MIGRATIONS` | （内部用）`0` で起動時マイグレーションを抑止。子プロセスでは自動的に `0` | `1` |
 
 ## ローカル開発
 
 ```bash
 cp .env.example .env
-# .env に DISCORD_TOKEN を記入
+# 単一なら DISCORD_TOKEN、複数なら DISCORD_TOKENS を設定
 docker compose up
 ```
 
@@ -224,7 +237,7 @@ docker compose up
 
 | 変数 | 値 |
 |---|---|
-| `DISCORD_TOKEN` | Discord Developer Portal から取得 |
+| `DISCORD_TOKEN` または `DISCORD_TOKENS` | Discord Developer Portal から取得（複数運用は `DISCORD_TOKENS`） |
 | `VOICEVOX_URL` | `http://voicevox.railway.internal:50021` |
 | `DATABASE_URL` | PostgreSQL プラグインから自動注入 |
 
@@ -234,7 +247,7 @@ docker compose up
 2. PostgreSQL プラグインを追加
 3. VOICEVOX サービスを追加（Docker Image: `voicevox/voicevox_engine:cpu-latest`）
 4. Bot サービスを追加（GitHub リポジトリ連携、Root Directory: `bot/`）
-5. Bot の環境変数に `DISCORD_TOKEN` と `VOICEVOX_URL` を設定
+5. Bot の環境変数に `DISCORD_TOKEN` または `DISCORD_TOKENS` と `VOICEVOX_URL` を設定
 6. デプロイ（`DATABASE_URL` は PostgreSQL プラグインから自動注入）
 
 ## クレジット
