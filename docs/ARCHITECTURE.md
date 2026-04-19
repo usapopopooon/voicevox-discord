@@ -155,6 +155,20 @@ CREATE TABLE schema_migrations (
 - HTTP は共有 `aiohttp.ClientSession` で Keep-Alive 再利用
 - テキスト前処理は fast-path ガードで不要な regex/emoji 置換をスキップ
 
+### 読み辞書（built-in / user）の関係
+
+- **適用順序**: `apply_dict`（ユーザ辞書）→ `apply_reading_corrections`（built-in）の順。ユーザ辞書で先に置換し、その後 built-in が拾えなかった部分を補正する。読みが既にカナ化された箇所は built-in も多くは noop。
+- **ユーザ辞書 vs built-in の重複防止**:
+  - 登録時 (`add_dict_entry`): 単語+読みが built-in と完全一致する登録は拒否し、ephemeral で「ビルドインと完全一致するため登録不要（読みを変えれば登録可能）」を返す
+  - 起動時 (`purge_builtin_duplicates_from_user_dicts`): 既存ユーザ辞書から built-in 完全一致エントリを一括削除。ビルドイン拡充への自動追従。失敗しても on_ready は止めない
+  - 1文字でも違えば登録可（ユーザのオーバーライド意図を尊重）。英語キーは case-insensitive 比較
+- **CJK 互換単位記号の自動展開** ([readings_builtin.py](../bot/readings_builtin.py)):
+  - U+3300–U+33FF の Squared Katakana words (㌔→キロ、㍉→ミリ、㍍→メートル等) は `unicodedata.NFKC` で自動生成
+  - Latin に分解されるもの (㎐→Hz、㎏→kg 等) は TTS engine 依存を避けるため、`_CJK_COMPAT_LATIN_UNIT_READINGS` で日本語カナ表記を手書き登録（ヘルツ/キログラム/ヘクタール等 約77件）
+- **ネット略語の正規化方針**:
+  - `XD` `(爆)` `(苦笑)` `🤣` などは「だいわらい」「ばくわら」「くわら」のような造語/略語を避け、**おおわらい / ばくしょう / にがわらい** のような標準日本語表記に統一
+  - 「草」は「くさ」と「わらい」の両義あるため変換せず TTS の自然読み（くさ）に委ねる。`www` `ｗｗ` のみ「わらい」化（曖昧性なし）
+
 ### 起動シーケンス
 
 `on_ready` では以下の順で初期化を実施する。
@@ -163,8 +177,9 @@ CREATE TABLE schema_migrations (
 2. `init_db` で必要テーブルを保証
 3. `load_builtin_reading_dicts` で built-in 辞書を DB + デフォルトから再構築
 4. ユーザー設定・ギルド辞書・ミュートをメモリへロード
-5. スラッシュコマンド同期・スピーカー取得
-6. `_restore_voice_sessions_on_startup` で `active_voice_sessions` を読み、再起動前に接続していた VC へ順次再接続
+5. `purge_builtin_duplicates_from_user_dicts` で、ビルドインと**単語+読み完全一致**するユーザー辞書を一括削除（ビルドイン拡充時の冗長エントリを掃除）。DB 操作失敗時は warning ログのみ出して on_ready の後続処理を巻き添えにしない
+6. スラッシュコマンド同期・スピーカー取得
+7. `_restore_voice_sessions_on_startup` で `active_voice_sessions` を読み、再起動前に接続していた VC へ順次再接続
 
 ### VC セッション復旧
 

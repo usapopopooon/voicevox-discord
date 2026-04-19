@@ -478,6 +478,30 @@ class TestReadingCorrections:
 
         assert apply_reading_corrections("今日はいい日") == "今日はいい日"
 
+    def test_cjk_compat_unit_symbols(self):
+        """U+3300-U+33FF の Squared Katakana 単位記号がカナ展開される"""
+        from bot import apply_reading_corrections
+
+        assert apply_reading_corrections("5㌔走った") == "5キロ走った"
+        assert apply_reading_corrections("100㍉のネジ") == "100ミリのネジ"
+        assert apply_reading_corrections("3㍍跳ぶ") == "3メートル跳ぶ"
+        assert apply_reading_corrections("80㌫") == "80パーセント"
+        assert apply_reading_corrections("1㌧") == "1トン"
+        # 複数記号が混在しても順次置換される
+        assert apply_reading_corrections("3㌖と500㍉") == "3キロメートルと500ミリ"
+
+    def test_cjk_compat_latin_unit_symbols_get_kana_readings(self):
+        """Latin 分解される単位記号は手書きマップでカナ展開される"""
+        from bot import apply_reading_corrections
+
+        assert apply_reading_corrections("100㎐") == "100ヘルツ"
+        assert apply_reading_corrections("5㎏") == "5キログラム"
+        assert apply_reading_corrections("10㎜") == "10ミリメートル"
+        assert apply_reading_corrections("3㎉") == "3キロカロリー"
+        assert apply_reading_corrections("256㎆") == "256メガバイト"
+        assert apply_reading_corrections("80㏈") == "80デシベル"
+        assert apply_reading_corrections("2㎡") == "2へいほうメートル"
+
     def test_replaces_business_and_news_terms(self):
         from bot import apply_reading_corrections
 
@@ -698,10 +722,13 @@ class TestCleanText:
         assert clean_text("それなwww") == "それなわらい"
         assert clean_text("それなｗｗ") == "それなわらい"
 
-    def test_replaces_jp_net_slang_kusa(self):
+    def test_does_not_convert_kusa_to_warai(self):
+        """「草」は本来の意味（くさ）でも使われるため変換せず TTS に委ねる"""
         from bot import clean_text
 
-        assert clean_text("草") == "わらい"
+        assert clean_text("草") == "草"
+        assert clean_text("草を刈る") == "草を刈る"
+        assert clean_text("おもしろくて草") == "おもしろくて草"
 
     def test_replaces_deco_symbols(self):
         from bot import clean_text
@@ -4201,3 +4228,258 @@ class TestJoinStaleVoiceClient:
         # stale の cleanup として disconnect も呼ばれた
         stale_vc.disconnect.assert_awaited_once()
         queues.pop(8021, None)
+
+
+class TestEmoticonReadingsAreNaturalJapanese:
+    """ネット略語ではなく標準日本語の読みになっていることの回帰テスト"""
+
+    def test_xd_reads_as_oowarai(self):
+        from bot import clean_text
+
+        # 「だいわらい」(造語) ではなく「おおわらい」(大笑い) になる
+        out = clean_text("そうそうXD")
+        assert "おおわらい" in out
+        assert "だいわらい" not in out
+
+    def test_paren_baku_reads_as_bakushou(self):
+        from bot import clean_text
+
+        # 「ばくわら」(略語) ではなく「ばくしょう」(爆笑) になる
+        out = clean_text("みた(爆)")
+        assert "ばくしょう" in out
+        assert "ばくわら" not in out
+
+    def test_paren_kushou_reads_as_nigawarai(self):
+        from bot import clean_text
+
+        # 「くわら」(略語) ではなく「にがわらい」(苦笑い) になる
+        out = clean_text("えっ(苦笑)")
+        assert "にがわらい" in out
+        assert "くわら" not in out
+
+    def test_rofl_emoji_reads_as_bakushou(self):
+        from bot import clean_text
+
+        # 🤣 も「ばくわら」ではなく「ばくしょう」
+        out = clean_text("🤣")
+        assert "ばくしょう" in out
+        assert "ばくわら" not in out
+
+
+@pytest.fixture
+def fixed_builtin_readings(monkeypatch):
+    """重複判定テスト用に builtin 辞書を固定セットに差し替える。
+
+    実 builtin の特定エントリ ("雰囲気" 等) に依存しないようにし、将来
+    builtin から削除されてもテストが壊れないようにする。
+    """
+    import bot
+
+    monkeypatch.setattr(
+        bot,
+        "_READING_CORRECTIONS",
+        {"テスト語": "てすとご", "重複漢字": "ちょうふくかんじ"},
+    )
+    monkeypatch.setattr(
+        bot,
+        "_ENGLISH_WORD_READINGS",
+        {"foo": "フー", "bar": "バー"},
+    )
+
+
+class TestBuiltinDuplicateDetection:
+    def test_returns_true_for_jp_exact_match(self, fixed_builtin_readings):
+        import bot
+
+        assert bot._is_builtin_duplicate("テスト語", "てすとご") is True
+
+    def test_returns_false_when_reading_differs(self, fixed_builtin_readings):
+        import bot
+
+        # 1文字でも違えば登録可（ユーザー上書き）
+        assert bot._is_builtin_duplicate("テスト語", "てすご") is False
+
+    def test_returns_false_for_unknown_word(self, fixed_builtin_readings):
+        import bot
+
+        assert bot._is_builtin_duplicate("ぜんぜん知らない単語", "なに") is False
+
+    def test_returns_true_for_english_case_insensitive(self, fixed_builtin_readings):
+        import bot
+
+        # ENGLISH_WORD_READINGS は lowercase キー、matching も大小無視
+        # → "Foo" "FOO" "foo" すべて重複扱い
+        assert bot._is_builtin_duplicate("foo", "フー") is True
+        assert bot._is_builtin_duplicate("Foo", "フー") is True
+        assert bot._is_builtin_duplicate("FOO", "フー") is True
+
+    def test_returns_false_for_english_with_different_reading(
+        self, fixed_builtin_readings
+    ):
+        import bot
+
+        assert bot._is_builtin_duplicate("foo", "フゥ") is False
+
+
+class TestAddDictEntryRejectsDuplicates:
+    async def test_rejects_builtin_duplicate(
+        self, mock_db_pool, fixed_builtin_readings
+    ):
+        import bot
+
+        _, conn = mock_db_pool
+
+        ok = await bot.add_dict_entry(8501, "テスト語", "てすとご")
+        assert ok is False
+        conn.execute.assert_not_awaited()
+        assert "テスト語" not in bot.guild_dicts.get(8501, {})
+
+    async def test_accepts_when_reading_differs_from_builtin(
+        self, mock_db_pool, fixed_builtin_readings
+    ):
+        import bot
+
+        _, conn = mock_db_pool
+        try:
+            ok = await bot.add_dict_entry(8502, "テスト語", "てすご")
+            assert ok is True
+            conn.execute.assert_awaited_once()
+            assert bot.guild_dicts[8502]["テスト語"] == "てすご"
+        finally:
+            bot.guild_dicts.pop(8502, None)
+
+    async def test_accepts_completely_new_word(
+        self, mock_db_pool, fixed_builtin_readings
+    ):
+        import bot
+
+        _, conn = mock_db_pool
+        try:
+            ok = await bot.add_dict_entry(8503, "未知語", "みちご")
+            assert ok is True
+            conn.execute.assert_awaited_once()
+        finally:
+            bot.guild_dicts.pop(8503, None)
+
+
+class TestPurgeBuiltinDuplicates:
+    async def test_removes_only_exact_matches(
+        self, mock_db_pool, fixed_builtin_readings
+    ):
+        import bot
+
+        _, conn = mock_db_pool
+        bot.guild_dicts[8601] = {
+            "テスト語": "てすとご",  # builtin と完全一致 → 削除
+            "テスト語2": "てすご",  # word 違い → 残す
+            "重複漢字": "ちょうふくかんじ",  # builtin と完全一致 → 削除
+            "独自語": "どくじご",  # builtin になし → 残す
+        }
+        try:
+            count = await bot.purge_builtin_duplicates_from_user_dicts()
+            assert count == 2
+            assert "テスト語" not in bot.guild_dicts.get(8601, {})
+            assert "重複漢字" not in bot.guild_dicts.get(8601, {})
+            assert bot.guild_dicts[8601]["テスト語2"] == "てすご"
+            assert bot.guild_dicts[8601]["独自語"] == "どくじご"
+            conn.executemany.assert_awaited_once()
+        finally:
+            bot.guild_dicts.pop(8601, None)
+
+    async def test_returns_zero_when_no_duplicates(
+        self, mock_db_pool, fixed_builtin_readings
+    ):
+        import bot
+
+        _, conn = mock_db_pool
+        bot.guild_dicts[8602] = {"独自語A": "ええ", "独自語B": "びー"}
+        try:
+            count = await bot.purge_builtin_duplicates_from_user_dicts()
+            assert count == 0
+            conn.executemany.assert_not_awaited()
+            assert "独自語A" in bot.guild_dicts[8602]
+        finally:
+            bot.guild_dicts.pop(8602, None)
+
+    async def test_drops_empty_guild_after_purge(
+        self, mock_db_pool, fixed_builtin_readings
+    ):
+        """全エントリが重複だった場合は guild key 自体を消す"""
+        import bot
+
+        bot.guild_dicts[8603] = {"テスト語": "てすとご"}
+        try:
+            await bot.purge_builtin_duplicates_from_user_dicts()
+            assert 8603 not in bot.guild_dicts
+        finally:
+            bot.guild_dicts.pop(8603, None)
+
+    async def test_invalidates_dict_pattern_cache(
+        self, mock_db_pool, fixed_builtin_readings
+    ):
+        """purge 後は当該 guild のコンパイル済みパターンキャッシュも破棄される"""
+        import bot
+
+        bot.guild_dicts[8604] = {
+            "テスト語": "てすとご",
+            "残る語": "のこるご",
+        }
+        # cache を仮に登録しておく
+        import re
+
+        bot._dict_patterns[8604] = re.compile("dummy")
+        try:
+            await bot.purge_builtin_duplicates_from_user_dicts()
+            # 削除があった guild の pattern cache は破棄される
+            assert 8604 not in bot._dict_patterns
+        finally:
+            bot.guild_dicts.pop(8604, None)
+            bot._dict_patterns.pop(8604, None)
+
+    async def test_db_failure_keeps_memory_change_and_warns(
+        self, mock_db_pool, fixed_builtin_readings, caplog
+    ):
+        """DB 操作が例外でもメモリ削除は確定し、warning ログのみ出して握りつぶす"""
+        import bot
+
+        _, conn = mock_db_pool
+        conn.executemany = AsyncMock(side_effect=RuntimeError("db down"))
+
+        bot.guild_dicts[8605] = {"テスト語": "てすとご"}
+        try:
+            with caplog.at_level("WARNING"):
+                count = await bot.purge_builtin_duplicates_from_user_dicts()
+            # 件数は返り、メモリ削除は完了
+            assert count == 1
+            assert "テスト語" not in bot.guild_dicts.get(8605, {})
+            # 警告ログが出る（例外は上位に伝播しない）
+            assert any("DB削除に失敗" in r.message for r in caplog.records)
+        finally:
+            bot.guild_dicts.pop(8605, None)
+
+
+class TestDictAddModalRejectsDuplicate:
+    async def test_modal_shows_error_for_builtin_duplicate(
+        self, mock_db_pool, fixed_builtin_readings
+    ):
+        import bot
+        from bot import DictAddModal
+
+        modal = DictAddModal(8701)
+        modal.word = MagicMock()
+        modal.word.value = "テスト語"
+        modal.reading = MagicMock()
+        modal.reading.value = "てすとご"
+        interaction = MagicMock()
+        interaction.response.send_message = AsyncMock()
+        interaction.response.edit_message = AsyncMock()
+
+        try:
+            await modal.on_submit(interaction)
+            interaction.response.send_message.assert_awaited_once()
+            msg = interaction.response.send_message.await_args.args[0]
+            assert "ビルドイン辞書と完全一致" in msg
+            interaction.response.edit_message.assert_not_called()
+            assert "テスト語" not in bot.guild_dicts.get(8701, {})
+        finally:
+            bot.guild_dicts.pop(8701, None)

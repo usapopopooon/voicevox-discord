@@ -422,8 +422,8 @@ _BASIC_KAOMOJI: dict[str, str] = {
     "OTL": "がっくり",
     # 笑い（ネットスラング）
     "(笑)": "わらい",
-    "(爆)": "ばくわら",
-    "(苦笑)": "くわら",
+    "(爆)": "ばくしょう",
+    "(苦笑)": "にがわらい",
     # 挨拶・手振り
     "(^_^)/": "ばいばい",
     "ノシ": "ばいばい",
@@ -444,8 +444,8 @@ _WESTERN_EMOTICON_READING: dict[str, str] = {
     ":(": "しょんぼり",
     ":'-(": "なく",
     ":'(": "なく",
-    "XD": "だいわらい",
-    "xD": "だいわらい",
+    "XD": "おおわらい",
+    "xD": "おおわらい",
     "<3": "はーと",
 }
 _WESTERN_EMOTICON_PATTERN = re.compile(
@@ -525,7 +525,7 @@ if _KAOMOJI_DICT:
 _KAOMOJI_OPENERS = {"(", "（"}
 _KAOMOJI_CLOSERS = {")", "）"}
 _WESTERN_EMOTICON_TRIGGER_CHARS = {":", ";", "=", "8", "x", "X"}
-_JP_NET_SLANG_TRIGGER_CHARS = {"草", "w", "W", "ｗ", "Ｗ"}
+_JP_NET_SLANG_TRIGGER_CHARS = {"w", "W", "ｗ", "Ｗ"}
 
 
 def _contains_any_char(text: str, candidates: set[str]) -> bool:
@@ -586,15 +586,14 @@ def _replace_western_emoticon(text: str) -> str:
     )
 
 
-# 日本語圏のネットスラング（笑い表現）
-_JP_NET_SLANG_PATTERN = re.compile(
-    r"(?P<kusa>(?<![\w.])草+(?![\w.]))"
-    r"|(?P<w>(?<![A-Za-z0-9.])[wｗ]{2,}(?![A-Za-z0-9.]))"
-)
+# 日本語圏のネットスラング（笑い表現）。
+# 「草」は文字としての意味（くさ）も多いため変換対象にせず、TTS の自然読み「くさ」に
+# 任せる。曖昧性のない www / ｗｗ のみ「わらい」に置換する。
+_JP_NET_SLANG_PATTERN = re.compile(r"(?<![A-Za-z0-9.])[wｗ]{2,}(?![A-Za-z0-9.])")
 
 
 def _replace_jp_net_slang(text: str) -> str:
-    """日本語ネットスラング（草 / www / ｗｗ）を読み仮名に置換する。"""
+    """日本語ネットスラング（www / ｗｗ）を読み仮名に置換する。"""
     return _JP_NET_SLANG_PATTERN.sub("わらい", text)
 
 
@@ -605,7 +604,7 @@ _UNICODE_EMOJI_READING: dict[str, str] = {
     "😀": "にこにこ",
     "😁": "にっこり",
     "😂": "わらい",
-    "🤣": "ばくわら",
+    "🤣": "ばくしょう",
     "😆": "わらい",
     "😊": "えがお",
     "😍": "だいすき",
@@ -1238,8 +1237,32 @@ async def load_builtin_reading_dicts():
         )
 
 
-async def add_dict_entry(guild_id: int, word: str, reading: str):
-    """辞書エントリをメモリ/DBに保存しパターンキャッシュを無効化する"""
+def _is_builtin_duplicate(word: str, reading: str) -> bool:
+    """user 辞書 (word → reading) がビルドイン辞書と単語+読み完全一致するか判定。
+
+    - 日本語ビルドイン (`_READING_CORRECTIONS`): 単語キーで直接比較
+    - 英語ビルドイン (`_ENGLISH_WORD_READINGS`): キーが小文字保持・matching も
+      case-insensitive のため、単語側を lowercase 化して比較
+    - 読みは大小区別ありで完全一致のみ True（カナ/かなの揺れも別エントリ扱い）
+
+    True なら登録不要（同じ挙動が既にビルドインで実現される）。
+    1文字でも違うなら False を返し、ユーザー上書きとして登録可能とする。
+    """
+    if _READING_CORRECTIONS.get(word) == reading:
+        return True
+    if _ENGLISH_WORD_READINGS.get(word.lower()) == reading:
+        return True
+    return False
+
+
+async def add_dict_entry(guild_id: int, word: str, reading: str) -> bool:
+    """辞書エントリをメモリ/DBに保存しパターンキャッシュを無効化する。
+
+    ビルドインと単語+読みが完全一致する場合は登録せず False を返す
+    （冗長エントリでDBを汚さないため）。成功時は True。
+    """
+    if _is_builtin_duplicate(word, reading):
+        return False
     # メモリ更新とキャッシュ無効化を await 前に行い、
     # 他コルーチンから古いパターンで apply_dict される race を防ぐ
     guild_dicts.setdefault(guild_id, {})[word] = reading
@@ -1255,6 +1278,60 @@ async def add_dict_entry(guild_id: int, word: str, reading: str):
             word,
             reading,
         )
+    return True
+
+
+async def purge_builtin_duplicates_from_user_dicts() -> int:
+    """既存ユーザー辞書からビルドインと完全一致するエントリを一括削除する。
+
+    起動時に1回呼ぶ想定。ビルドイン辞書が後から拡充されてユーザーの古い登録が
+    冗長になったケースを掃除する。削除件数を返す。
+
+    DB操作で例外が出てもメモリ削除は確定済みなので、その場では warning ログ
+    のみ出して握りつぶす（次起動時に load_guild_dicts→再 purge で自己治癒する）。
+    """
+    pairs_to_delete: list[tuple[int, str]] = []
+    per_guild_count: dict[int, int] = {}
+    for gid, d in guild_dicts.items():
+        for word, reading in d.items():
+            if _is_builtin_duplicate(word, reading):
+                pairs_to_delete.append((gid, word))
+                per_guild_count[gid] = per_guild_count.get(gid, 0) + 1
+    if not pairs_to_delete:
+        return 0
+
+    for gid, word in pairs_to_delete:
+        d = guild_dicts.get(gid)
+        if d:
+            d.pop(word, None)
+            if not d:
+                guild_dicts.pop(gid, None)
+    for gid in per_guild_count:
+        _invalidate_dict_cache(gid)
+
+    try:
+        async with _require_db_pool().acquire() as conn:
+            await conn.executemany(
+                "DELETE FROM guild_dicts WHERE guild_id = $1 AND word = $2",
+                pairs_to_delete,
+            )
+    except Exception as e:
+        # メモリと DB が瞬間的に不整合になるが、次起動時の load_guild_dicts→
+        # 再 purge ループで自然に追いつくため、警告ログのみで継続する。
+        logger.warning(
+            f"ビルドイン重複ユーザー辞書のDB削除に失敗: {e} "
+            f"(メモリは {len(pairs_to_delete)} 件削除済み、次起動時に再試行)"
+        )
+        return len(pairs_to_delete)
+
+    breakdown = ", ".join(
+        f"guild={gid}:{n}件" for gid, n in sorted(per_guild_count.items())
+    )
+    logger.info(
+        f"ビルドインと重複するユーザー辞書を {len(pairs_to_delete)} 件削除 "
+        f"({breakdown})"
+    )
+    return len(pairs_to_delete)
 
 
 async def delete_dict_entry(guild_id: int, word: str):
@@ -1980,7 +2057,14 @@ class DictAddModal(ui.Modal, title="辞書に追加"):
             )
             return
 
-        await add_dict_entry(self.guild_id, word, reading)
+        added = await add_dict_entry(self.guild_id, word, reading)
+        if not added:
+            await interaction.response.send_message(
+                f"「{word} → {reading}」はビルドイン辞書と完全一致するため "
+                "登録不要です（読みを変えれば登録可能）",
+                ephemeral=True,
+            )
+            return
 
         content, view = build_dict_message(self.guild_id)
         await interaction.response.edit_message(content=content, view=view)
@@ -2022,6 +2106,12 @@ async def on_ready():
     await load_user_settings()
     await load_guild_dicts()
     await load_guild_mutes()
+    # ビルドイン辞書と完全重複するユーザー辞書を掃除（ビルドイン拡充への追従）。
+    # 失敗しても on_ready の後続処理を巻き添えにしない（次起動で再試行）。
+    try:
+        await purge_builtin_duplicates_from_user_dicts()
+    except Exception as e:
+        logger.warning(f"ビルドイン重複ユーザー辞書の掃除でエラー: {e}")
     await tree.sync()
     logger.info(f"Botログイン: {client.user} (ID: {client.user.id})")
     logger.info("スラッシュコマンドを同期しました")
