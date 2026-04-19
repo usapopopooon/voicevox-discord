@@ -16,6 +16,12 @@ from discord import app_commands, ui
 from dotenv import load_dotenv
 from kaomoji_builtin import KAOMOJI_DICT as _BUILTIN_KAOMOJI_DICT
 
+try:
+    import emoji as emoji_lib
+except ImportError:  # pragma: no cover
+    # 依存がない環境では既存の簡易置換にフォールバック
+    emoji_lib = None
+
 load_dotenv()
 
 # ログ設定（本番では LOG_LEVEL=WARNING 等でログ量を絞ってストレージ課金を節約）
@@ -271,8 +277,8 @@ _BASIC_KAOMOJI: dict[str, str] = {
     "(#゚Д゚)": "おこる",
     "(-_-#)": "おこる",
     "(ಠ_ಠ)": "じとー",
-    "(｀・ω・´)": "きりっ",
-    "(｀・∀・´)": "きりっ",
+    "(｀・ω・´)": "しゃきーん",
+    "(｀・∀・´)": "しゃきーん",
     "(๑•̀ㅂ•́)و✧": "がんばる",
     # お辞儀・謝る
     "m(_ _)m": "ぺこり",
@@ -285,10 +291,10 @@ _BASIC_KAOMOJI: dict[str, str] = {
     "(_ _)": "ねむい",
     "zzz": "ねむい",
     # 落ち込む・困る
-    "(´・ω・`)": "うーん",
+    "(´・ω・`)": "しょぼーん",
     "( ´・ω・`)": "うーん",
-    "(´・ω・)": "うーん",
-    "(・ω・)": "うーん",
+    "(´・ω・)": "しょぼーん",
+    "(・ω・)": "しょぼーん",
     "(*ﾉωﾉ)": "てれ",
     "( ˙꒳˙ )": "ふむ",
     "(´_ゝ`)": "ふーん",
@@ -386,6 +392,8 @@ def _replace_jp_net_slang(text: str) -> str:
 
 # 高頻度 Unicode 絵文字の読み替え。必要最小限に絞ってコストを抑える。
 _UNICODE_EMOJI_READING: dict[str, str] = {
+    "☺️": "にっこり",
+    "☺": "にっこり",
     "😀": "にこにこ",
     "😁": "にっこり",
     "😂": "わらい",
@@ -427,9 +435,122 @@ _UNICODE_EMOJI_PATTERN: re.Pattern[str] | None = re.compile(
 )
 _EMOJI_SKIN_TONE_MODIFIER_PATTERN = re.compile(r"[\U0001F3FB-\U0001F3FF]")
 
+# デコ系でよく使う装飾記号（非Emoji含む）
+_DECO_SYMBOL_READING: dict[str, str] = {
+    "♡": "はーと",
+    "♥": "はーと",
+    "❤": "はーと",
+    "❣": "はーと",
+    "❥": "はーと",
+    "☆": "ほし",
+    "★": "ほし",
+    "✩": "ほし",
+    "✪": "ほし",
+    "✦": "きらきら",
+    "✧": "きらきら",
+    "✨": "きらきら",
+    "❇": "きらきら",
+    "❈": "きらきら",
+    "♪": "おんぷ",
+    "♫": "おんぷ",
+    "♬": "おんぷ",
+    "♩": "おんぷ",
+    "❀": "はな",
+    "✿": "はな",
+    "❁": "はな",
+    "❃": "はな",
+    "❋": "はな",
+}
+_DECO_SYMBOL_PATTERN = re.compile(
+    "|".join(re.escape(k) for k in sorted(_DECO_SYMBOL_READING, key=len, reverse=True))
+)
+
+# demojize で得られる short code の代表的なデコ系読み
+_EMOJI_SHORTCODE_READING: dict[str, str] = {
+    "sparkles": "きらきら",
+    "sparkling_heart": "はーと",
+    "heart_decoration": "はーと",
+    "heart_exclamation": "はーと",
+    "two_hearts": "はーと",
+    "revolving_hearts": "はーと",
+    "growing_heart": "はーと",
+    "white_heart": "はーと",
+    "pink_heart": "はーと",
+    "blue_heart": "はーと",
+    "green_heart": "はーと",
+    "yellow_heart": "はーと",
+    "purple_heart": "はーと",
+    "ribbon": "りぼん",
+    "gift": "ぷれぜんと",
+    "wrapped_gift": "ぷれぜんと",
+    "party_popper": "おいわい",
+    "confetti_ball": "おいわい",
+    "balloon": "ふうせん",
+    "cherry_blossom": "さくら",
+    "bouquet": "はなたば",
+    "musical_note": "おんぷ",
+    "musical_notes": "おんぷ",
+}
+
+_EMOJI_SHORTCODE_KEYWORD_READING: dict[str, str] = {
+    "heart": "はーと",
+    "sparkle": "きらきら",
+    "star": "ほし",
+    "music": "おんぷ",
+    "flower": "はな",
+    "blossom": "はな",
+    "ribbon": "りぼん",
+    "gift": "ぷれぜんと",
+    "party": "おいわい",
+    "confetti": "おいわい",
+}
+
+
+def _replace_deco_symbols(text: str) -> str:
+    """デコ記号を読み仮名に置換する。"""
+    return _DECO_SYMBOL_PATTERN.sub(lambda m: _DECO_SYMBOL_READING[m.group(0)], text)
+
+
+def _shortcode_to_reading(shortcode: str) -> str | None:
+    """絵文字 short code から当てられる日本語読みを返す。"""
+    if not shortcode:
+        return None
+    direct = _EMOJI_SHORTCODE_READING.get(shortcode)
+    if direct is not None:
+        return direct
+    for keyword, reading in _EMOJI_SHORTCODE_KEYWORD_READING.items():
+        if keyword in shortcode:
+            return reading
+    return None
+
 
 def _replace_unicode_emoji(text: str) -> str:
-    """高頻度 Unicode 絵文字を読み仮名に置換する。"""
+    """Unicode絵文字を読み仮名に置換する。
+
+    既知の絵文字は `_UNICODE_EMOJI_READING` を優先し、
+    未知の絵文字も `えもじ_<shortcode>` 形式で読み上げ可能にする。
+    """
+    if emoji_lib is not None:
+
+        def _replace(chars: str, data: dict) -> str:
+            reading = _UNICODE_EMOJI_READING.get(chars)
+            if reading is not None:
+                return reading
+            normalized_chars = _EMOJI_SKIN_TONE_MODIFIER_PATTERN.sub("", chars)
+            reading = _UNICODE_EMOJI_READING.get(normalized_chars)
+            if reading is not None:
+                return reading
+            shortcode = emoji_lib.demojize(normalized_chars, delimiters=("", ""))
+            shortcode = shortcode.replace(":", "")
+            guessed = _shortcode_to_reading(shortcode)
+            if guessed is not None:
+                return guessed
+            if not shortcode:
+                return chars
+            return "えもじ_" + shortcode
+
+        return emoji_lib.replace_emoji(text, _replace)
+
     if _UNICODE_EMOJI_PATTERN is None:
         return text
     return _UNICODE_EMOJI_PATTERN.sub(
@@ -851,11 +972,12 @@ def is_muted(guild_id: int, user_id: int) -> bool:
 def clean_text(text: str) -> str:
     """読み上げ用にテキストを前処理する。
     顔文字（長一致優先）→ 横向き顔文字（境界付き）→ 日本語ネットスラング
-    → Unicode絵文字
+    → デコ記号 → Unicode絵文字
     → 肌色修飾子正規化 → URL/メール/カスタム絵文字 の順で置換する。"""
     text = _replace_kaomoji(text)
     text = _replace_western_emoticon(text)
     text = _replace_jp_net_slang(text)
+    text = _replace_deco_symbols(text)
     text = _replace_unicode_emoji(text)
     text = _normalize_emoji_modifiers(text)
     return _CLEAN_TEXT_PATTERN.sub(_clean_text_replace, text).strip()

@@ -225,6 +225,8 @@ class TestCleanText:
         from bot import clean_text
 
         assert clean_text("こんにちは😀") == "こんにちはにこにこ"
+        assert clean_text("こんにちは☺️") == "こんにちはにっこり"
+        assert clean_text("おめでと🎀✨") == "おめでとりぼんきらきら"
 
     def test_replaces_unicode_emoji_with_skin_tone(self):
         from bot import clean_text
@@ -232,9 +234,15 @@ class TestCleanText:
         assert clean_text("こんにちは👍🏻") == "こんにちはぐっど"
 
     def test_preserves_unknown_unicode_emoji(self):
+        import bot
         from bot import clean_text
 
-        assert clean_text("こんにちは🫩") == "こんにちは🫩"
+        result = clean_text("こんにちは🫩")
+        if bot.emoji_lib is None:
+            assert result == "こんにちは🫩"
+        else:
+            assert result.startswith("こんにちはえもじ_")
+            assert "🫩" not in result
 
     def test_replaces_western_emoticon(self):
         from bot import clean_text
@@ -251,6 +259,11 @@ class TestCleanText:
         from bot import clean_text
 
         assert clean_text("草") == "わらい"
+
+    def test_replaces_deco_symbols(self):
+        from bot import clean_text
+
+        assert clean_text("かわいい♡☆♪") == "かわいいはーとほしおんぷ"
 
     def test_does_not_replace_western_emoticon_inside_word(self):
         from bot import clean_text
@@ -272,6 +285,12 @@ class TestCleanText:
 
         assert clean_text("やった＼(^o^)／") == "やったばんざい"
         assert clean_text("つらい(´；ω；｀)") == "つらいなく"
+
+    def test_replaces_2ch_kaomoji_naming(self):
+        from bot import clean_text
+
+        assert clean_text("(´・ω・`)") == "しょぼーん"
+        assert clean_text("(｀・ω・´)") == "しゃきーん"
 
     def test_empty_after_clean(self):
         from bot import clean_text
