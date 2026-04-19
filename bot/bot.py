@@ -2310,12 +2310,13 @@ async def join(interaction: discord.Interaction):
 
     # 接続時に音声で挨拶
     try:
-        async with _synth_order_lock(guild.id):
-            settings = get_user_settings(guild.id, interaction.user.id)
-            audio_data = await synthesize("せつぞくしました", settings, cache=True)
-            vc = guild.voice_client
-            if vc and _is_vc_connected(vc):
-                queues[guild.id].append(audio_data)
+        # ※ パフォーマンス調査のため _synth_order_lock を一旦無効化
+        # async with _synth_order_lock(guild.id):
+        settings = get_user_settings(guild.id, interaction.user.id)
+        audio_data = await synthesize("せつぞくしました", settings, cache=True)
+        vc = guild.voice_client
+        if vc and _is_vc_connected(vc):
+            queues[guild.id].append(audio_data)
         vc = guild.voice_client
         if vc and _is_vc_connected(vc) and _can_start_playback(vc):
             await play_next(guild.id, vc)
@@ -2408,15 +2409,16 @@ async def on_voice_state_update(
             if not vc or not vc.is_connected():
                 return
 
-            async with _synth_order_lock(guild_id):
-                settings = get_user_settings(member.guild.id, member.id)
-                audio_data = await synthesize(text, settings, cache=True)
+            # ※ パフォーマンス調査のため _synth_order_lock を一旦無効化
+            # async with _synth_order_lock(guild_id):
+            settings = get_user_settings(member.guild.id, member.id)
+            audio_data = await synthesize(text, settings, cache=True)
 
-                vc = member.guild.voice_client
-                if not vc or not vc.is_connected():
-                    return
+            vc = member.guild.voice_client
+            if not vc or not vc.is_connected():
+                return
 
-                _ensure_queue(guild_id).append(audio_data)
+            _ensure_queue(guild_id).append(audio_data)
 
             if _can_start_playback(vc):
                 await play_next(guild_id, vc)
@@ -2782,11 +2784,12 @@ async def on_message(message: discord.Message):
         return
 
     # 合成→queue追加をロックで包んで到着順に並べる（並行タスクによる逆転防止）
+    # ※ パフォーマンス調査のため一旦無効化（直列化が他Bot比で遅延の主因の疑い）
     try:
-        async with _synth_order_lock(guild_id):
-            settings = get_user_settings(guild_id, message.author.id)
-            audio_data = await synthesize(text, settings)
-            _ensure_queue(guild_id).append(audio_data)
+        # async with _synth_order_lock(guild_id):
+        settings = get_user_settings(guild_id, message.author.id)
+        audio_data = await synthesize(text, settings)
+        _ensure_queue(guild_id).append(audio_data)
     except aiohttp.ClientError:
         logger.warning("音声合成エンジンに接続できません（再起動中の可能性）")
         now = time.monotonic()
