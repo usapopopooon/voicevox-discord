@@ -237,10 +237,14 @@ def _can_start_playback(vc: discord.VoiceClient) -> bool:
 
 
 def _is_vc_connected(vc: discord.VoiceClient) -> bool:
-    """VC が接続中かを安全に判定する（遷移中の ClientException を吸収）"""
+    """VC が接続中かを安全に判定する。
+
+    遷移中の `discord.ClientException` を含め、判定中に何らかの例外が出た場合は
+    呼び出し側のコマンドハンドラを巻き添えにしないよう「未接続」として扱う。
+    """
     try:
         return vc.is_connected()
-    except discord.ClientException:
+    except Exception:
         return False
 
 
@@ -258,6 +262,30 @@ async def _safe_disconnect(vc: discord.VoiceClient) -> None:
         await vc.disconnect()
     except Exception as e:
         logger.warning(f"切断でエラー: {e}")
+
+
+def _has_active_voice_connection(guild: discord.Guild) -> bool:
+    """guild に現在実接続している VC があるかを判定する。
+
+    `guild.voice_client` は切断後も残骸として None でない場合があるため、
+    オブジェクトの有無だけでなく `is_connected()` まで確認する。
+    """
+    vc = guild.voice_client
+    return vc is not None and _is_vc_connected(vc)
+
+
+async def _reset_voice_state(guild: discord.Guild) -> None:
+    """guild の VC 接続を無効化し、メモリ状態を完全に掃除する。
+
+    呼び出し側で `_has_active_voice_connection` を False と確認した分岐
+    （= 切断済みのはずの状態）で呼び、stale な voice_client 残骸 + 残留キュー
+    を一括で初期化するための helper。
+    """
+    stale = guild.voice_client
+    if stale is not None:
+        logger.info(f"stale voice_client を掃除 guild={guild.id}")
+        await _safe_disconnect(stale)
+    _cleanup_guild_state(guild.id)
 
 
 async def _require_guild_interaction(
@@ -2068,17 +2096,20 @@ async def join(interaction: discord.Interaction):
             await interaction.response.send_message("VCの人数制限に達しています")
             return
 
-    was_connected = guild.voice_client is not None
+    # voice_client が残骸として残っていることがあるため実接続を確認する
+    existing_active = _has_active_voice_connection(guild)
     try:
-        if was_connected:
+        if existing_active:
             await guild.voice_client.move_to(channel)
         else:
+            # stale な voice_client が残っていれば掃除してから新規接続
+            await _reset_voice_state(guild)
             await channel.connect()
     except Exception as e:
         await interaction.response.send_message(f"VCへの接続に失敗しました: {e}")
         return
 
-    if was_connected:
+    if existing_active:
         # move_to の場合: 既存キュー（未再生の音声）は保持
         _ensure_queue(guild.id)
     else:
@@ -2213,8 +2244,8 @@ async def leave(interaction: discord.Interaction):
     if guild is None:
         return
 
-    if guild.voice_client:
-        # ユーザー意図の切断: 起動時 restore で勝手に戻らないよう session も削除
+    if _has_active_voice_connection(guild):
+        # 実接続中 → 切断: 起動時 restore で勝手に戻らないよう session も削除
         try:
             await forget_voice_session(guild.id)
         except Exception as e:
@@ -2223,6 +2254,8 @@ async def leave(interaction: discord.Interaction):
         _cleanup_guild_state(guild.id)
         await interaction.response.send_message("切断しました")
     else:
+        # 既に切断済みなら残骸を掃除してその旨を返す
+        await _reset_voice_state(guild)
         await interaction.response.send_message("ボイスチャンネルに接続していません")
 
 
@@ -2232,8 +2265,8 @@ async def vc_toggle(interaction: discord.Interaction):
     if guild is None:
         return
 
-    if guild.voice_client:
-        # ユーザー意図の切断: 起動時 restore で勝手に戻らないよう session も削除
+    if _has_active_voice_connection(guild):
+        # 実接続中 → 切断
         try:
             await forget_voice_session(guild.id)
         except Exception as e:
@@ -2242,6 +2275,8 @@ async def vc_toggle(interaction: discord.Interaction):
         _cleanup_guild_state(guild.id)
         await interaction.response.send_message("切断しました")
     else:
+        # 何らかの原因で既に切断されている場合の残骸を掃除してから接続
+        await _reset_voice_state(guild)
         await join.callback(interaction)
 
 

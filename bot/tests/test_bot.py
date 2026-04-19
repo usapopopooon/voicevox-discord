@@ -2698,6 +2698,35 @@ class TestJoinCommand:
         msg = interaction.response.send_message.await_args.args[0]
         assert "VCへの接続に失敗" in msg
 
+    async def test_move_to_failure_preserves_existing_state(self):
+        """既に接続中のBotを別VCへ移動する際 move_to が失敗したらエラー応答を返し、
+        既存キューには手を加えない（連続実行で破壊しない）"""
+        from bot import join, queues
+
+        interaction = _make_interaction(guild_id=9201, user_id=9202)
+        channel = MagicMock()
+        channel.user_limit = 0
+        perms = MagicMock()
+        perms.connect = True
+        perms.speak = True
+        channel.permissions_for.return_value = perms
+        interaction.user.voice = MagicMock()
+        interaction.user.voice.channel = channel
+        # 実接続中（active）で move_to が失敗するシナリオ
+        interaction.guild.voice_client.is_connected.return_value = True
+        interaction.guild.voice_client.move_to = AsyncMock(
+            side_effect=RuntimeError("target VC full")
+        )
+
+        queues[9201] = deque([b"queued-audio"])
+        await join.callback(interaction)
+
+        msg = interaction.response.send_message.await_args.args[0]
+        assert "VCへの接続に失敗" in msg
+        # 失敗時は queue が初期化されない（既存音声が破壊されない）
+        assert b"queued-audio" in queues[9201]
+        queues.pop(9201, None)
+
     async def test_clears_stale_queue_on_join(self):
         from bot import join, queues
 
@@ -2734,10 +2763,12 @@ class TestJoinCommand:
         channel.permissions_for.return_value = perms
         interaction.user.voice = MagicMock()
         interaction.user.voice.channel = channel
-        # 既に接続中（voice_client が Truthy、move_to は AsyncMock）
+        # 既に実接続中（_has_active_voice_connection が True を返す状態）
         interaction.guild.voice_client.move_to = AsyncMock()
-        # 挨拶の play_next で再生が走らないよう is_connected=False にしておく
-        interaction.guild.voice_client.is_connected.return_value = False
+        interaction.guild.voice_client.is_connected.return_value = True
+        # 挨拶の play_next を抑止するため再生中扱い
+        interaction.guild.voice_client.is_playing.return_value = True
+        interaction.guild.voice_client.is_paused.return_value = False
 
         queues[9003] = deque([b"queued-audio"])
         with patch("bot.synthesize", new=AsyncMock(return_value=b"hi")):
@@ -4048,3 +4079,125 @@ class TestRunSingleBotTokenInvalid:
             bot._run_single_bot("token-x")
 
         assert sleep_calls == []  # backoff sleep されない
+
+
+class TestVcToggleStaleState:
+    async def test_disconnects_when_actually_connected(self):
+        from bot import vc_toggle
+
+        interaction = _make_interaction(guild_id=8001)
+        interaction.guild.voice_client = MagicMock()
+        interaction.guild.voice_client.is_connected.return_value = True
+        interaction.guild.voice_client.disconnect = AsyncMock()
+
+        await vc_toggle.callback(interaction)
+        interaction.guild.voice_client.disconnect.assert_awaited_once()
+        interaction.response.send_message.assert_awaited_once_with("切断しました")
+
+    async def test_treats_stale_voice_client_as_disconnected_and_connects(self):
+        """voice_client が残骸として残っているが is_connected=False の場合、
+        切断扱いせず join に転送する（『切断しました』にならない）"""
+        from bot import vc_toggle
+
+        interaction = _make_interaction(guild_id=8002)
+        interaction.guild.voice_client = MagicMock()
+        interaction.guild.voice_client.is_connected.return_value = False
+        interaction.guild.voice_client.disconnect = AsyncMock()
+        # join.callback が短絡するよう VC 未参加にしておく
+        interaction.user.voice = None
+
+        await vc_toggle.callback(interaction)
+        # stale の cleanup として disconnect は呼ばれた
+        interaction.guild.voice_client.disconnect.assert_awaited_once()
+        # 「切断しました」ではなく join 側のメッセージになる
+        interaction.response.send_message.assert_awaited_once_with(
+            "先にボイスチャンネルに入ってください"
+        )
+
+    async def test_connects_when_no_voice_client(self):
+        from bot import vc_toggle
+
+        interaction = _make_interaction(guild_id=8003)
+        interaction.guild.voice_client = None
+        interaction.user.voice = None
+
+        await vc_toggle.callback(interaction)
+        # join に転送
+        interaction.response.send_message.assert_awaited_once_with(
+            "先にボイスチャンネルに入ってください"
+        )
+
+
+class TestLeaveStaleState:
+    async def test_disconnects_when_actually_connected(self):
+        from bot import leave
+
+        interaction = _make_interaction(guild_id=8011)
+        interaction.guild.voice_client = MagicMock()
+        interaction.guild.voice_client.is_connected.return_value = True
+        interaction.guild.voice_client.disconnect = AsyncMock()
+
+        await leave.callback(interaction)
+        interaction.guild.voice_client.disconnect.assert_awaited_once()
+        interaction.response.send_message.assert_awaited_once_with("切断しました")
+
+    async def test_says_not_connected_when_voice_client_is_stale(self):
+        """voice_client 残骸 + is_connected=False → 「切断しました」と誤表示しない"""
+        from bot import leave
+
+        interaction = _make_interaction(guild_id=8012)
+        interaction.guild.voice_client = MagicMock()
+        interaction.guild.voice_client.is_connected.return_value = False
+        interaction.guild.voice_client.disconnect = AsyncMock()
+
+        await leave.callback(interaction)
+        # stale の cleanup
+        interaction.guild.voice_client.disconnect.assert_awaited_once()
+        interaction.response.send_message.assert_awaited_once_with(
+            "ボイスチャンネルに接続していません"
+        )
+
+    async def test_says_not_connected_when_no_voice_client(self):
+        from bot import leave
+
+        interaction = _make_interaction(guild_id=8013)
+        interaction.guild.voice_client = None
+
+        await leave.callback(interaction)
+        interaction.response.send_message.assert_awaited_once_with(
+            "ボイスチャンネルに接続していません"
+        )
+
+
+class TestJoinStaleVoiceClient:
+    async def test_cleans_stale_voice_client_and_connects_fresh(self):
+        """voice_client 残骸 + is_connected=False → move_to ではなく
+        cleanup + 新規 connect する"""
+        from bot import join, queues
+
+        interaction = _make_interaction(guild_id=8021, user_id=8022)
+        channel = MagicMock()
+        channel.user_limit = 0
+        perms = MagicMock()
+        perms.connect = True
+        perms.speak = True
+        channel.permissions_for.return_value = perms
+        channel.connect = AsyncMock()
+        interaction.user.voice = MagicMock()
+        interaction.user.voice.channel = channel
+        # stale voice_client（is_connected=False）
+        stale_vc = MagicMock()
+        stale_vc.is_connected.return_value = False
+        stale_vc.disconnect = AsyncMock()
+        stale_vc.move_to = AsyncMock()
+        interaction.guild.voice_client = stale_vc
+
+        with patch("bot.synthesize", new=AsyncMock(return_value=b"hi")):
+            await join.callback(interaction)
+
+        # move_to ではなく channel.connect が呼ばれた
+        stale_vc.move_to.assert_not_called()
+        channel.connect.assert_awaited_once()
+        # stale の cleanup として disconnect も呼ばれた
+        stale_vc.disconnect.assert_awaited_once()
+        queues.pop(8021, None)
