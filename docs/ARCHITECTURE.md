@@ -36,6 +36,10 @@ Discord のテキストチャンネルに投稿されたメッセージを、VOI
 voicevox-discord/
 ├── bot/
 │   ├── bot.py                ← Bot 本体
+│   ├── readings_builtin.py   ← built-in 読み辞書（JP/EN）
+│   ├── kaomoji_builtin.py    ← built-in 顔文字辞書
+│   ├── migrate.py            ← マイグレーションランナー
+│   ├── migrations/           ← 逐次適用される DB マイグレーション
 │   ├── Dockerfile            ← 本番用 (Railway)
 │   ├── Dockerfile.dev        ← 開発用 (watchdog ホットリロード)
 │   ├── railway.toml          ← Railway サービス設定
@@ -117,14 +121,41 @@ CREATE TABLE guild_mutes (
     user_id BIGINT NOT NULL,
     PRIMARY KEY (guild_id, user_id)
 );
+
+-- built-in 読み辞書（起動時にメモリへロード）
+CREATE TABLE builtin_reading_dicts (
+    dict_type TEXT NOT NULL,
+    word TEXT NOT NULL,
+    reading TEXT NOT NULL,
+    PRIMARY KEY (dict_type, word),
+    CHECK (dict_type IN ('jp', 'en'))
+);
+
+-- 適用済みマイグレーション管理
+CREATE TABLE schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 ```
 
 ### キャッシュ戦略
 
 - 起動時に DB から全件ロードしてメモリキャッシュ
+- `builtin_reading_dicts` は「保存先を DB、実行時はメモリ参照」の方針
 - `apply_dict` はギルドごとにコンパイル済み正規表現を保持（辞書更新時に無効化）
 - 定型文合成は LRU キャッシュ（in-flight 制御で同時重複合成を抑止）
 - HTTP は共有 `aiohttp.ClientSession` で Keep-Alive 再利用
+- テキスト前処理は fast-path ガードで不要な regex/emoji 置換をスキップ
+
+### 起動シーケンス
+
+`on_ready` では以下の順で初期化を実施する。
+
+1. `migrate.py` で未適用マイグレーションを実行（`schema_migrations` 管理）
+2. `init_db` で必要テーブルを保証
+3. `load_builtin_reading_dicts` で built-in 辞書を DB + デフォルトから再構築
+4. ユーザー設定・ギルド辞書・ミュートをメモリへロード
+5. スラッシュコマンド同期・スピーカー取得
 
 ## 音声合成フロー
 
