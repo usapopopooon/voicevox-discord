@@ -4,11 +4,13 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 import unicodedata
 import wave
 from collections import OrderedDict, deque
 from dataclasses import dataclass
+from pathlib import Path
 
 import aiohttp
 import asyncpg
@@ -1635,6 +1637,8 @@ def apply_reading_corrections(text: str) -> str:
 # DB接続プール
 db_pool: asyncpg.Pool | None = None
 db_init_lock = asyncio.Lock()
+MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+MIGRATION_LOCK_KEY = 775832991
 
 # apply_dict のコンパイル済みパターンキャッシュ（ギルド毎）
 _dict_patterns: dict[int, re.Pattern[str]] = {}
@@ -1812,6 +1816,64 @@ async def init_db():
         logger.info("DB初期化完了")
 
 
+def _migration_files() -> list[Path]:
+    """migrations ディレクトリの Python ファイルをファイル名順で返す。"""
+    if not MIGRATIONS_DIR.exists():
+        return []
+    files = sorted(MIGRATIONS_DIR.glob("*.py"))
+    return [p for p in files if p.name != "__init__.py"]
+
+
+async def run_pending_migrations():
+    """未適用マイグレーションを実行する（起動時自動実行）。
+
+    起動コマンドを変更せず `python bot.py` のままで運用できるよう、
+    on_ready から呼び出している。
+    """
+    files = _migration_files()
+    if not files:
+        return
+
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute("SELECT pg_advisory_lock($1)", MIGRATION_LOCK_KEY)
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        rows = await conn.fetch("SELECT name FROM schema_migrations")
+        applied = {row["name"] for row in rows}
+
+        for path in files:
+            name = path.name
+            if name in applied:
+                continue
+            logger.info(f"マイグレーション実行: {name}")
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, str(path)],
+                check=False,
+                env=os.environ.copy(),
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"マイグレーション失敗: {name}")
+            await conn.execute(
+                "INSERT INTO schema_migrations (name) VALUES ($1) "
+                "ON CONFLICT DO NOTHING",
+                name,
+            )
+            logger.info(f"マイグレーション完了: {name}")
+    finally:
+        try:
+            await conn.execute("SELECT pg_advisory_unlock($1)", MIGRATION_LOCK_KEY)
+        finally:
+            await conn.close()
+
+
 async def load_user_settings():
     """DBからユーザー設定をメモリにロード"""
     async with _require_db_pool().acquire() as conn:
@@ -1867,47 +1929,59 @@ async def load_guild_dicts():
 
 
 async def load_builtin_reading_dicts():
-    """DBから built-in 読み辞書をメモリにロード（空ならデフォルトを初期投入）。"""
+    """DBから built-in 読み辞書をメモリにロードし、不足するデフォルト語を補完投入する。
+
+    メモリ側は「デフォルト + DB上書き」で構築するため、
+    DBが部分投入状態でも built-in の取りこぼしが発生しない。
+    """
     async with _require_db_pool().acquire() as conn:
         rows = await conn.fetch(
             "SELECT dict_type, word, reading FROM builtin_reading_dicts"
         )
 
-        seeded = False
-        if not rows:
-            seed_rows = [
-                ("jp", w, r) for w, r in _DEFAULT_READING_CORRECTIONS.items()
-            ] + [("en", w, r) for w, r in _DEFAULT_ENGLISH_WORD_READINGS.items()]
+        db_jp = {
+            row["word"]: row["reading"] for row in rows if row["dict_type"] == "jp"
+        }
+        db_en = {
+            row["word"]: row["reading"] for row in rows if row["dict_type"] == "en"
+        }
+
+        # DBにまだ存在しない built-in 項目のみを投入（既存のDB値は保持）。
+        missing_seed_rows = [
+            ("jp", w, r)
+            for w, r in _DEFAULT_READING_CORRECTIONS.items()
+            if w not in db_jp
+        ] + [
+            ("en", w, r)
+            for w, r in _DEFAULT_ENGLISH_WORD_READINGS.items()
+            if w not in db_en
+        ]
+        if missing_seed_rows:
             await conn.executemany(
                 """
                 INSERT INTO builtin_reading_dicts (dict_type, word, reading)
                 VALUES ($1, $2, $3)
-                ON CONFLICT (dict_type, word) DO UPDATE SET reading = EXCLUDED.reading
+                ON CONFLICT (dict_type, word) DO NOTHING
                 """,
-                seed_rows,
+                missing_seed_rows,
             )
-            rows = [
-                {"dict_type": t, "word": w, "reading": r} for (t, w, r) in seed_rows
-            ]
-            seeded = True
 
-    jp: dict[str, str] = {}
-    en: dict[str, str] = {}
-    for row in rows:
-        if row["dict_type"] == "jp":
-            jp[row["word"]] = row["reading"]
-        elif row["dict_type"] == "en":
-            en[row["word"]] = row["reading"]
+    # メモリ辞書はデフォルトを土台に DB で上書きする。
+    jp = dict(_DEFAULT_READING_CORRECTIONS)
+    jp.update(db_jp)
+    en = dict(_DEFAULT_ENGLISH_WORD_READINGS)
+    en.update(db_en)
 
     _READING_CORRECTIONS.clear()
-    _READING_CORRECTIONS.update(jp or _DEFAULT_READING_CORRECTIONS)
+    _READING_CORRECTIONS.update(jp)
     _ENGLISH_WORD_READINGS.clear()
-    _ENGLISH_WORD_READINGS.update(en or _DEFAULT_ENGLISH_WORD_READINGS)
+    _ENGLISH_WORD_READINGS.update(en)
     _rebuild_reading_patterns()
 
-    if seeded:
+    if missing_seed_rows:
         logger.info(
-            "built-in読み辞書をDBへ初期投入しました: "
+            "built-in読み辞書をDBへ不足分投入しました: "
+            f"inserted={len(missing_seed_rows)}件, "
             f"jp={len(_READING_CORRECTIONS)}件, en={len(_ENGLISH_WORD_READINGS)}件"
         )
     else:
@@ -2538,6 +2612,7 @@ class DictDeleteModal(ui.Modal, title="辞書から削除"):
 
 @client.event
 async def on_ready():
+    await run_pending_migrations()
     await init_db()
     await load_builtin_reading_dicts()
     await load_user_settings()

@@ -11,6 +11,7 @@ def _make_mock_pool(rows=None):
     """asyncpg.Pool のモックを作成（acquire() が conn を返す async ctx mgr）"""
     conn = MagicMock()
     conn.execute = AsyncMock()
+    conn.executemany = AsyncMock()
     conn.fetch = AsyncMock(return_value=rows or [])
     conn.fetchval = AsyncMock(return_value=None)
 
@@ -1216,6 +1217,36 @@ class TestDbOperations:
             conn.executemany.assert_awaited_once()
             assert bot.apply_reading_corrections("雰囲気") in {"ふんいき", "ふいんき"}
             assert bot.apply_reading_corrections("home") == "ホーム"
+        finally:
+            bot._READING_CORRECTIONS.clear()
+            bot._READING_CORRECTIONS.update(original_jp)
+            bot._ENGLISH_WORD_READINGS.clear()
+            bot._ENGLISH_WORD_READINGS.update(original_en)
+            bot._rebuild_reading_patterns()
+
+    async def test_load_builtin_reading_dicts_merges_partial_db_and_keeps_defaults(
+        self, mock_db_pool
+    ):
+        import bot
+
+        _, conn = mock_db_pool
+        conn.fetch.return_value = [
+            {"dict_type": "jp", "word": "雰囲気", "reading": "ふいんき"},
+            {"dict_type": "en", "word": "home", "reading": "ホームー"},
+        ]
+        conn.executemany = AsyncMock()
+        original_jp = dict(bot._READING_CORRECTIONS)
+        original_en = dict(bot._ENGLISH_WORD_READINGS)
+        try:
+            await bot.load_builtin_reading_dicts()
+            # DB値が優先される
+            assert bot.apply_reading_corrections("雰囲気") == "ふいんき"
+            assert bot.apply_reading_corrections("home") == "ホームー"
+            # DB未登録のデフォルト語も使える
+            assert bot.apply_reading_corrections("重複") == "ちょうふく"
+            assert bot.apply_reading_corrections("school") == "スクール"
+            # 不足分の投入が走る
+            conn.executemany.assert_awaited_once()
         finally:
             bot._READING_CORRECTIONS.clear()
             bot._READING_CORRECTIONS.update(original_jp)
