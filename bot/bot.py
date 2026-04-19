@@ -25,6 +25,7 @@ from readings_builtin import (
 from readings_builtin import (
     READING_CORRECTIONS as _BUILTIN_READING_CORRECTIONS,
 )
+from readings_builtin import to_katakana
 
 try:
     import emoji as emoji_lib
@@ -1176,7 +1177,7 @@ async def save_user_setting(guild_id: int, user_id: int, settings: VoiceSettings
 
 
 async def load_guild_dicts():
-    """DBからギルドの辞書設定をメモリにロード"""
+    """DBからギルドの辞書設定をメモリにロード（読みはカタカナ統一）"""
     async with _require_db_pool().acquire() as conn:
         rows = await conn.fetch("SELECT guild_id, word, reading FROM guild_dicts")
     guild_dicts.clear()
@@ -1185,7 +1186,8 @@ async def load_guild_dicts():
         gid = row["guild_id"]
         if gid not in guild_dicts:
             guild_dicts[gid] = {}
-        guild_dicts[gid][row["word"]] = row["reading"]
+        # ひらがな登録の旧データも実行時にカタカナ化（VOICEVOX is_kana 用）
+        guild_dicts[gid][row["word"]] = to_katakana(row["reading"])
     logger.info(f"辞書設定を読み込みました: {len(guild_dicts)}ギルド")
 
 
@@ -1200,11 +1202,16 @@ async def load_builtin_reading_dicts():
             "SELECT dict_type, word, reading FROM builtin_reading_dicts"
         )
 
+        # 旧 hiragana 投入された値も実行時にカタカナ化（VOICEVOX is_kana 用）
         db_jp = {
-            row["word"]: row["reading"] for row in rows if row["dict_type"] == "jp"
+            row["word"]: to_katakana(row["reading"])
+            for row in rows
+            if row["dict_type"] == "jp"
         }
         db_en = {
-            row["word"]: row["reading"] for row in rows if row["dict_type"] == "en"
+            row["word"]: to_katakana(row["reading"])
+            for row in rows
+            if row["dict_type"] == "en"
         }
 
         # DBにまだ存在しない built-in 項目のみを投入（既存のDB値は保持）。
@@ -1275,7 +1282,10 @@ async def add_dict_entry(guild_id: int, word: str, reading: str) -> bool:
 
     ビルドインと単語+読みが完全一致する場合は登録せず False を返す
     （冗長エントリでDBを汚さないため）。成功時は True。
+    読みは VOICEVOX is_kana モードで送るためカタカナ化して保存する。
     """
+    # ユーザーがひらがなで入力してもカタカナで保存・適用する
+    reading = to_katakana(reading)
     if _is_builtin_duplicate(word, reading):
         return False
     # メモリ更新とキャッシュ無効化を await 前に行い、
@@ -1865,28 +1875,74 @@ async def _build_synthesis_candidates(
     return candidates
 
 
+def _is_kana_only_text(text: str) -> bool:
+    """text が VOICEVOX の AquesTalk 表記として送れる純カナ列かを判定する。
+
+    全文字がカナ + 記号（句読点・空白・伸ばし棒など）なら True。
+    これが True の時、`/audio_query` の morpheme 解析で読みが書き換えられる
+    （「ダイヨン」→「ダイシ」等）のを避けるため `is_kana=true` モードで合成する。
+    """
+    if not text:
+        return False
+    allowed_punct = set(" 　、。！？!?・ー〜~,.\n")
+    return all(
+        ("\u30a0" <= ch <= "\u30ff")  # カタカナ
+        or ("\u3040" <= ch <= "\u309f")  # ひらがな
+        or ch in allowed_punct
+        for ch in text
+    )
+
+
 async def _synthesize_with_candidate(
     engine_url: str,
     real_id: int,
     text: str,
     settings: VoiceSettings,
 ) -> bytes:
-    """指定候補で音声合成を1回実行する。"""
-    session = await get_http_session()
-    params = {"text": text, "speaker": real_id}
-    async with session.post(f"{engine_url}/audio_query", params=params) as resp:
-        resp.raise_for_status()
-        query = await resp.json()
+    """指定候補で音声合成を1回実行する。
 
-    # ユーザーの音声パラメータを適用
-    query["speedScale"] = settings.speed
-    query["pitchScale"] = settings.pitch
-    query["intonationScale"] = settings.intonation
-    query["volumeScale"] = settings.volume
-    # Discord 互換フォーマットを直接要求 → ffmpeg 経由の変換を省略可能にする
-    # 未対応エンジンは無視するのでデフォルトフォーマットで返る（FFmpeg で再生）
-    query["outputSamplingRate"] = _DISCORD_SAMPLE_RATE
-    query["outputStereo"] = True
+    text が純カナ列の場合は `/accent_phrases?is_kana=true` で morpheme 解析を
+    バイパスし、辞書登録の読みが VOICEVOX に書き換えられるのを防ぐ。
+    漢字混じりテキストは従来通り `/audio_query` で自然な抑揚を得る。
+    """
+    session = await get_http_session()
+    if _is_kana_only_text(text):
+        # AquesTalk 表記前提のため text をカタカナ化（ひらがな入力にも対応）
+        kana_text = to_katakana(text)
+        # 1) /accent_phrases で is_kana=true で読み専用に解析
+        async with session.post(
+            f"{engine_url}/accent_phrases",
+            params={"text": kana_text, "speaker": real_id, "is_kana": "true"},
+        ) as resp:
+            resp.raise_for_status()
+            accent_phrases = await resp.json()
+        # 2) audio_query 構造を手組みする（/audio_query を経由しない）
+        query = {
+            "accent_phrases": accent_phrases,
+            "speedScale": settings.speed,
+            "pitchScale": settings.pitch,
+            "intonationScale": settings.intonation,
+            "volumeScale": settings.volume,
+            "prePhonemeLength": 0.1,
+            "postPhonemeLength": 0.1,
+            "outputSamplingRate": _DISCORD_SAMPLE_RATE,
+            "outputStereo": True,
+            "kana": kana_text,
+        }
+    else:
+        params = {"text": text, "speaker": real_id}
+        async with session.post(f"{engine_url}/audio_query", params=params) as resp:
+            resp.raise_for_status()
+            query = await resp.json()
+        # ユーザーの音声パラメータを適用
+        query["speedScale"] = settings.speed
+        query["pitchScale"] = settings.pitch
+        query["intonationScale"] = settings.intonation
+        query["volumeScale"] = settings.volume
+        # Discord 互換フォーマットを直接要求 → ffmpeg 経由の変換を省略可能にする
+        # 未対応エンジンは無視するのでデフォルトフォーマットで返る（FFmpeg で再生）
+        query["outputSamplingRate"] = _DISCORD_SAMPLE_RATE
+        query["outputStereo"] = True
 
     async with session.post(
         f"{engine_url}/synthesis",

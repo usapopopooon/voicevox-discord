@@ -56,7 +56,7 @@ class TestSynthesize:
                 re.compile(r"http://test-voicevox:50021/synthesis"),
                 body=b"fake-wav-data",
             )
-            result = await synthesize("テスト", VoiceSettings())
+            result = await synthesize("テスト本文", VoiceSettings())
             assert result == b"fake-wav-data"
 
     async def test_raises_on_api_error(self):
@@ -68,7 +68,7 @@ class TestSynthesize:
                 status=500,
             )
             with pytest.raises(Exception):
-                await synthesize("テスト", VoiceSettings())
+                await synthesize("テスト本文", VoiceSettings())
 
     async def test_applies_voice_params(self):
         from bot import VoiceSettings, synthesize
@@ -90,7 +90,7 @@ class TestSynthesize:
                 re.compile(r"http://test-voicevox:50021/synthesis"),
                 body=b"fake-wav-data",
             )
-            result = await synthesize("テスト", settings)
+            result = await synthesize("テスト本文", settings)
             assert result == b"fake-wav-data"
 
             # synthesis に送られたリクエストボディのパラメータを検証
@@ -100,6 +100,106 @@ class TestSynthesize:
             assert body["pitchScale"] == 0.1
             assert body["intonationScale"] == 1.2
             assert body["volumeScale"] == 0.8
+
+
+class TestIsKanaOnlyText:
+    """純カナ列判定（is_kana=true 経路の入口）"""
+
+    def test_pure_katakana_is_true(self):
+        from bot import _is_kana_only_text
+
+        assert _is_kana_only_text("テスト") is True
+        assert _is_kana_only_text("ダイヨンキョウサツ") is True
+
+    def test_pure_hiragana_is_true(self):
+        from bot import _is_kana_only_text
+
+        assert _is_kana_only_text("こんにちは") is True
+
+    def test_kana_with_punct_is_true(self):
+        from bot import _is_kana_only_text
+
+        assert _is_kana_only_text("テスト、ですー！") is True
+
+    def test_kanji_mixed_is_false(self):
+        from bot import _is_kana_only_text
+
+        assert _is_kana_only_text("こんにちは本日") is False
+
+    def test_ascii_mixed_is_false(self):
+        from bot import _is_kana_only_text
+
+        assert _is_kana_only_text("テスト1") is False
+        assert _is_kana_only_text("テストA") is False
+
+    def test_empty_is_false(self):
+        from bot import _is_kana_only_text
+
+        assert _is_kana_only_text("") is False
+
+
+class TestSynthesizeKanaMode:
+    """純カナ列は /accent_phrases?is_kana=true 経路で送る。
+
+    morpheme 解析による読み崩れ（「ダイヨン」→「ダイシ」等）を防ぐ。
+    """
+
+    async def test_pure_kana_uses_accent_phrases_endpoint(self):
+        from bot import VoiceSettings, synthesize
+
+        with aioresponses() as m:
+            m.post(
+                re.compile(r"http://test-voicevox:50021/accent_phrases.*"),
+                payload=[],
+            )
+            m.post(
+                re.compile(r"http://test-voicevox:50021/synthesis"),
+                body=b"wav",
+            )
+            result = await synthesize("テスト", VoiceSettings())
+            assert result == b"wav"
+
+            # 1件目のリクエスト = /accent_phrases、is_kana=true / カタカナ化された text
+            req = list(m.requests.values())[0][0]
+            params = req.kwargs["params"]
+            assert params["is_kana"] == "true"
+            assert params["text"] == "テスト"
+
+            # /audio_query は呼ばれない
+            assert not any("audio_query" in str(k) for k in m.requests)
+
+    async def test_pure_hiragana_is_converted_to_katakana_for_engine(self):
+        """ひらがなで届いた user 辞書値もエンジンへはカタカナで送る"""
+        from bot import VoiceSettings, synthesize
+
+        with aioresponses() as m:
+            m.post(
+                re.compile(r"http://test-voicevox:50021/accent_phrases.*"),
+                payload=[],
+            )
+            m.post(
+                re.compile(r"http://test-voicevox:50021/synthesis"),
+                body=b"wav",
+            )
+            await synthesize("こんにちは", VoiceSettings())
+            req = list(m.requests.values())[0][0]
+            assert req.kwargs["params"]["text"] == "コンニチハ"
+
+    async def test_kanji_mixed_uses_audio_query(self):
+        from bot import VoiceSettings, synthesize
+
+        with aioresponses() as m:
+            m.post(
+                re.compile(r"http://test-voicevox:50021/audio_query.*"),
+                payload={"accent_phrases": []},
+            )
+            m.post(
+                re.compile(r"http://test-voicevox:50021/synthesis"),
+                body=b"wav",
+            )
+            await synthesize("こんにちは本日", VoiceSettings())
+            assert any("audio_query" in str(k) for k in m.requests)
+            assert not any("accent_phrases" in str(k) for k in m.requests)
 
 
 class TestVoiceSettings:
@@ -462,16 +562,16 @@ class TestReadingCorrections:
     def test_replaces_common_misread_kanji(self):
         from bot import apply_reading_corrections
 
-        assert apply_reading_corrections("雰囲気がいい") == "ふんいきがいい"
-        assert apply_reading_corrections("他人事だと思うな") == "ひとごとだと思うな"
+        assert apply_reading_corrections("雰囲気がいい") == "フンイキがいい"
+        assert apply_reading_corrections("他人事だと思うな") == "ヒトゴトだと思うな"
 
     def test_date_longest_match_wins(self):
         """一昨昨日 が 一昨日 より先にマッチする"""
         from bot import apply_reading_corrections
 
-        assert apply_reading_corrections("一昨昨日の話") == "さきおとといの話"
-        assert apply_reading_corrections("一昨日の話") == "おとといの話"
-        assert apply_reading_corrections("明後日来る") == "あさって来る"
+        assert apply_reading_corrections("一昨昨日の話") == "サキオトトイの話"
+        assert apply_reading_corrections("一昨日の話") == "オトトイの話"
+        assert apply_reading_corrections("明後日来る") == "アサッテ来る"
 
     def test_no_match_returns_original(self):
         from bot import apply_reading_corrections
@@ -495,54 +595,54 @@ class TestReadingCorrections:
         from bot import apply_reading_corrections
 
         # === 北斗の拳 ===
-        assert apply_reading_corrections("北斗神拳") == "ほくとしんけん"
-        assert apply_reading_corrections("経絡秘孔") == "けいらくひこう"
-        assert apply_reading_corrections("無想転生") == "むそうてんせい"
+        assert apply_reading_corrections("北斗神拳") == "ホクトシンケン"
+        assert apply_reading_corrections("経絡秘孔") == "ケイラクヒコウ"
+        assert apply_reading_corrections("無想転生") == "ムソウテンセイ"
         # === グラップラー刃牙 ===
-        assert apply_reading_corrections("範馬刃牙") == "はんまばき"
-        assert apply_reading_corrections("愚地独歩") == "おろちどっぽ"  # 誤読されがち
-        assert apply_reading_corrections("烈海王") == "れつかいおう"
+        assert apply_reading_corrections("範馬刃牙") == "ハンマバキ"
+        assert apply_reading_corrections("愚地独歩") == "オロチドッポ"  # 誤読されがち
+        assert apply_reading_corrections("烈海王") == "レツカイオウ"
         # === 魁!!男塾 (大会名は WebSearch で確認した非標準ルビ) ===
-        assert apply_reading_corrections("民明書房") == "みんめいしょぼう"
-        # 「大四」は「だいよん」(× だいし)
-        assert apply_reading_corrections("驚邏大四凶殺") == "きょうらだいよんきょうさつ"
-        # 「八連」は「ぱーれん」(× はちれん)
-        assert apply_reading_corrections("大威震八連制覇") == "だいいしんぱーれんせいは"
+        assert apply_reading_corrections("民明書房") == "ミンメイショボウ"
+        # 「大四」は「ダイヨン」(× ダイシ)
+        assert apply_reading_corrections("驚邏大四凶殺") == "キョウラダイヨンキョウサツ"
+        # 「八連」は「パーレン」(× ハチレン)
+        assert apply_reading_corrections("大威震八連制覇") == "ダイイシンパーレンセイハ"
         assert (
-            apply_reading_corrections("天挑五輪大武會") == "てんちょうごりんだいぶかい"
+            apply_reading_corrections("天挑五輪大武會") == "テンチョウゴリンダイブカイ"
         )
         # 男塾死天王 (公式メンバー: 卍丸/影慶/センクウ/羅刹)
-        assert apply_reading_corrections("センクウ") == "せんくう"
+        assert apply_reading_corrections("センクウ") == "センクウ"
         # 鎮魂歌→レクイエム (ルビ的造語)
         assert apply_reading_corrections("鎮魂歌を奏でる") == "レクイエムを奏でる"
         # === 鬼滅の刃 ===
-        assert apply_reading_corrections("竈門禰豆子") == "かまどねずこ"
-        assert apply_reading_corrections("悲鳴嶼行冥") == "ひめじまぎょうめい"
-        assert apply_reading_corrections("不死川実弥") == "しなずがわさねみ"
-        assert apply_reading_corrections("鬼舞辻無惨") == "きぶつじむざん"
-        assert apply_reading_corrections("黒死牟") == "こくしぼう"
-        assert apply_reading_corrections("猗窩座") == "あかざ"
+        assert apply_reading_corrections("竈門禰豆子") == "カマドネズコ"
+        assert apply_reading_corrections("悲鳴嶼行冥") == "ヒメジマギョウメイ"
+        assert apply_reading_corrections("不死川実弥") == "シナズガワサネミ"
+        assert apply_reading_corrections("鬼舞辻無惨") == "キブツジムザン"
+        assert apply_reading_corrections("黒死牟") == "コクシボウ"
+        assert apply_reading_corrections("猗窩座") == "アカザ"
         # === 呪術廻戦 ===
-        assert apply_reading_corrections("虎杖悠仁") == "いたどりゆうじ"
-        assert apply_reading_corrections("両面宿儺") == "りょうめんすくな"
-        assert apply_reading_corrections("伏魔御厨子") == "ふくまみづし"
+        assert apply_reading_corrections("虎杖悠仁") == "イタドリユウジ"
+        assert apply_reading_corrections("両面宿儺") == "リョウメンスクナ"
+        assert apply_reading_corrections("伏魔御厨子") == "フクマミヅシ"
         # === スラムダンク ===
-        assert apply_reading_corrections("桜木花道") == "さくらぎはなみち"
+        assert apply_reading_corrections("桜木花道") == "サクラギハナミチ"
         # === ジョジョ ===
-        assert apply_reading_corrections("空条承太郎") == "くうじょうじょうたろう"
+        assert apply_reading_corrections("空条承太郎") == "クウジョウジョウタロウ"
         # === 進撃の巨人 ===
-        assert apply_reading_corrections("立体機動装置") == "りったいきどうそうち"
+        assert apply_reading_corrections("立体機動装置") == "リッタイキドウソウチ"
         # === ヒロアカ ===
-        assert apply_reading_corrections("緑谷出久") == "みどりやいずく"
+        assert apply_reading_corrections("緑谷出久") == "ミドリヤイズク"
         # === ナルト ===
-        assert apply_reading_corrections("螺旋丸") == "らせんがん"
-        assert apply_reading_corrections("穢土転生") == "えどてんせい"
+        assert apply_reading_corrections("螺旋丸") == "ラセンガン"
+        assert apply_reading_corrections("穢土転生") == "エドテンセイ"
         # === BLEACH ===
-        assert apply_reading_corrections("卍解") == "ばんかい"
-        assert apply_reading_corrections("斬魄刀") == "ざんぱくとう"
+        assert apply_reading_corrections("卍解") == "バンカイ"
+        assert apply_reading_corrections("斬魄刀") == "ザンパクトウ"
         # === ONE PIECE ===
-        assert apply_reading_corrections("王下七武海") == "おうかしちぶかい"
-        assert apply_reading_corrections("天竜人") == "てんりゅうびと"
+        assert apply_reading_corrections("王下七武海") == "オウカシチブカイ"
+        assert apply_reading_corrections("天竜人") == "テンリュウビト"
 
     def test_chinese_cuisine_terms_use_japanese_menu_readings(self):
         """中華料理は漢字直読みではなく日本のメニューで定着した音訳カナで読む"""
@@ -556,30 +656,30 @@ class TestReadingCorrections:
         assert apply_reading_corrections("担々麺") == "タンタンメン"
         assert apply_reading_corrections("棒棒鶏") == "バンバンジー"
         assert apply_reading_corrections("油淋鶏") == "ユーリンチー"
-        assert apply_reading_corrections("八宝菜") == "はっぽうさい"
+        assert apply_reading_corrections("八宝菜") == "ハッポウサイ"
 
     def test_scitech_medical_terms_have_correct_readings(self):
         """誤読されやすい科学/数学/工学/医学用語が正しく読まれる"""
         from bot import apply_reading_corrections
 
         # 数学: 行列を「こうれつ」と誤読しない
-        assert apply_reading_corrections("行列を計算") == "ぎょうれつを計算"
+        assert apply_reading_corrections("行列を計算") == "ギョウレツを計算"
         # 統計: 尤度
-        assert apply_reading_corrections("最尤推定") == "さいゆうすいてい"
+        assert apply_reading_corrections("最尤推定") == "サイユウスイテイ"
         # 化学: 直鎖を「ちょくくさり」と誤読しない
-        assert apply_reading_corrections("直鎖アルカン") == "ちょくさアルカン"
+        assert apply_reading_corrections("直鎖アルカン") == "チョクサアルカン"
         # 天文: 緯度
-        assert apply_reading_corrections("緯度経度") == "いどけいど"
+        assert apply_reading_corrections("緯度経度") == "イドケイド"
         # 医学: 嚥下を「えんか」と誤読しない
-        assert apply_reading_corrections("嚥下障害") == "えんげしょうがい"
+        assert apply_reading_corrections("嚥下障害") == "エンゲショウガイ"
         # 医学: 増悪を「ぞうお」と誤読しない
-        assert apply_reading_corrections("症状が増悪") == "症状がぞうあく"
+        assert apply_reading_corrections("症状が増悪") == "症状がゾウアク"
         # 医学: 外科を「がいか」と誤読しない
-        assert apply_reading_corrections("外科手術") == "げか手術"
+        assert apply_reading_corrections("外科手術") == "ゲカ手術"
         # 医学: 浮腫を「うきはれ」と誤読しない
-        assert apply_reading_corrections("浮腫がある") == "ふしゅがある"
+        assert apply_reading_corrections("浮腫がある") == "フシュがある"
         # 物理: 摂動
-        assert apply_reading_corrections("摂動論") == "せつどう論"
+        assert apply_reading_corrections("摂動論") == "セツドウ論"
 
     def test_cjk_compat_latin_unit_symbols_get_kana_readings(self):
         """Latin 分解される単位記号は手書きマップでカナ展開される"""
@@ -591,82 +691,82 @@ class TestReadingCorrections:
         assert apply_reading_corrections("3㎉") == "3キロカロリー"
         assert apply_reading_corrections("256㎆") == "256メガバイト"
         assert apply_reading_corrections("80㏈") == "80デシベル"
-        assert apply_reading_corrections("2㎡") == "2へいほうメートル"
+        assert apply_reading_corrections("2㎡") == "2ヘイホウメートル"
 
     def test_replaces_business_and_news_terms(self):
         from bot import apply_reading_corrections
 
-        assert apply_reading_corrections("進捗を共有する") == "しんちょくを共有する"
-        assert apply_reading_corrections("規約を遵守する") == "規約をじゅんしゅする"
-        assert apply_reading_corrections("認識に齟齬がある") == "認識にそごがある"
+        assert apply_reading_corrections("進捗を共有する") == "シンチョクを共有する"
+        assert apply_reading_corrections("規約を遵守する") == "規約をジュンシュする"
+        assert apply_reading_corrections("認識に齟齬がある") == "認識にソゴがある"
         assert (
-            apply_reading_corrections("医療体制が逼迫する") == "医療体制がひっぱくする"
+            apply_reading_corrections("医療体制が逼迫する") == "医療体制がヒッパクする"
         )
-        assert apply_reading_corrections("案を踏襲する") == "案をとうしゅうする"
+        assert apply_reading_corrections("案を踏襲する") == "案をトウシュウする"
 
     def test_replaces_commonly_misread_practical_words(self):
         from bot import apply_reading_corrections
 
-        assert apply_reading_corrections("重複を避ける") == "ちょうふくを避ける"
-        assert apply_reading_corrections("資料を貼付する") == "資料をちょうふする"
-        assert apply_reading_corrections("続柄を記入する") == "つづきがらを記入する"
-        assert apply_reading_corrections("月極駐車場") == "つきぎめ駐車場"
-        assert apply_reading_corrections("既出の質問") == "きしゅつの質問"
-        assert apply_reading_corrections("生粋の江戸っ子") == "きっすいの江戸っ子"
+        assert apply_reading_corrections("重複を避ける") == "チョウフクを避ける"
+        assert apply_reading_corrections("資料を貼付する") == "資料をチョウフする"
+        assert apply_reading_corrections("続柄を記入する") == "ツヅキガラを記入する"
+        assert apply_reading_corrections("月極駐車場") == "ツキギメ駐車場"
+        assert apply_reading_corrections("既出の質問") == "キシュツの質問"
+        assert apply_reading_corrections("生粋の江戸っ子") == "キッスイの江戸っ子"
 
     def test_replaces_classic_hard_words(self):
         from bot import apply_reading_corrections
 
-        assert apply_reading_corrections("未曾有の災害") == "みぞうの災害"
-        assert apply_reading_corrections("何卒よろしく") == "なにとぞよろしく"
-        assert apply_reading_corrections("漸く終わった") == "ようやく終わった"
-        assert apply_reading_corrections("凡そ理解した") == "およそ理解した"
+        assert apply_reading_corrections("未曾有の災害") == "ミゾウの災害"
+        assert apply_reading_corrections("何卒よろしく") == "ナニトゾよろしく"
+        assert apply_reading_corrections("漸く終わった") == "ヨウヤク終わった"
+        assert apply_reading_corrections("凡そ理解した") == "オヨソ理解した"
 
     def test_replaces_yojijukugo_and_kotowaza_terms(self):
         from bot import apply_reading_corrections
 
         assert (
-            apply_reading_corrections("臥薪嘗胆して挑む") == "がしんしょうたんして挑む"
+            apply_reading_corrections("臥薪嘗胆して挑む") == "ガシンショウタンして挑む"
         )
-        assert apply_reading_corrections("付和雷同しない") == "ふわらいどうしない"
-        assert apply_reading_corrections("画竜点睛を欠く") == "がりょうてんせいを欠く"
-        assert apply_reading_corrections("塞翁が馬という話") == "さいおうがうまという話"
-        assert apply_reading_corrections("漁夫の利を得る") == "ぎょふのりを得る"
+        assert apply_reading_corrections("付和雷同しない") == "フワライドウしない"
+        assert apply_reading_corrections("画竜点睛を欠く") == "ガリョウテンセイを欠く"
+        assert apply_reading_corrections("塞翁が馬という話") == "サイオウガウマという話"
+        assert apply_reading_corrections("漁夫の利を得る") == "ギョフノリを得る"
 
     def test_replaces_additional_yojijukugo_and_proverbs(self):
         from bot import apply_reading_corrections
 
         assert (
-            apply_reading_corrections("青天の霹靂だった") == "せいてんのへきれきだった"
+            apply_reading_corrections("青天の霹靂だった") == "セイテンノヘキレキだった"
         )
         assert (
             apply_reading_corrections("井の中の蛙大海を知らず")
-            == "いのなかのかわずたいかいをしらず"
+            == "イノナカノカワズタイカイヲシラズ"
         )
-        assert apply_reading_corrections("虎の威を借る狐だ") == "とらのいをかるきつねだ"
-        assert apply_reading_corrections("岡目八目で見よう") == "おかめはちもくで見よう"
-        assert apply_reading_corrections("百花繚乱の時代") == "ひゃっかりょうらんの時代"
+        assert apply_reading_corrections("虎の威を借る狐だ") == "トラノイヲカルキツネだ"
+        assert apply_reading_corrections("岡目八目で見よう") == "オカメハチモクで見よう"
+        assert apply_reading_corrections("百花繚乱の時代") == "ヒャッカリョウランの時代"
 
     def test_replaces_artist_names_and_spellings(self):
         from bot import apply_reading_corrections
 
         assert apply_reading_corrections("Adoの新曲") == "アドの新曲"
-        assert apply_reading_corrections("米津玄師のライブ") == "よねずけんしのライブ"
+        assert apply_reading_corrections("米津玄師のライブ") == "ヨネズケンシのライブ"
         assert (
             apply_reading_corrections("Mrs. GREEN APPLEが好き")
-            == "みせす ぐりーん あっぷるが好き"
+            == "ミセス グリーン アップルが好き"
         )
         assert apply_reading_corrections("vaundyを聴く") == "バウンディを聴く"
 
     def test_replaces_latest_buzzwords_from_2025_list(self):
         from bot import apply_reading_corrections
 
-        assert apply_reading_corrections("権力勾配の問題") == "けんりょくこうばいの問題"
-        assert apply_reading_corrections("共連れを防ぐ") == "ともづれを防ぐ"
-        assert apply_reading_corrections("夏詣に行く") == "なつもうでに行く"
+        assert apply_reading_corrections("権力勾配の問題") == "ケンリョクコウバイの問題"
+        assert apply_reading_corrections("共連れを防ぐ") == "トモヅレを防ぐ"
+        assert apply_reading_corrections("夏詣に行く") == "ナツモウデに行く"
         assert (
             apply_reading_corrections("緊急銃猟を制度化")
-            == "きんきゅうじゅうりょうを制度化"
+            == "キンキュウジュウリョウを制度化"
         )
 
     def test_replaces_eiken_pre2_level_english_words(self):
@@ -1003,7 +1103,7 @@ class TestEngines:
 
         monkeypatch.setattr("bot.ENGINES", [])
         with pytest.raises(RuntimeError):
-            await synthesize("テスト", VoiceSettings())
+            await synthesize("テスト本文", VoiceSettings())
 
 
 class TestReadChannels:
@@ -1343,7 +1443,7 @@ class TestSynthesizeFallback:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"fallback-data")
-                result = await synthesize("テスト", VoiceSettings(speaker_id=99999))
+                result = await synthesize("テスト本文", VoiceSettings(speaker_id=99999))
                 assert result == b"fallback-data"
                 audio_query_call = list(m.requests.values())[0][0]
                 assert audio_query_call.kwargs["params"]["speaker"] == 3
@@ -1363,7 +1463,7 @@ class TestSynthesizeFallback:
                 with aioresponses() as m:
                     m.post(re.compile(r".*audio_query.*"), status=500)
                     with pytest.raises(aiohttp.ClientError):
-                        await synthesize("テスト", VoiceSettings(speaker_id=99999))
+                        await synthesize("テスト本文", VoiceSettings(speaker_id=99999))
         finally:
             bot._last_speaker_refresh_attempt = original_last_attempt
 
@@ -1377,7 +1477,7 @@ class TestSynthesizeFallback:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"mapped-data")
-                result = await synthesize("テスト", VoiceSettings(speaker_id=10003))
+                result = await synthesize("テスト本文", VoiceSettings(speaker_id=10003))
                 assert result == b"mapped-data"
                 audio_query_call = list(m.requests.values())[0][0]
                 assert audio_query_call.kwargs["params"]["speaker"] == 99
@@ -1402,7 +1502,9 @@ class TestSynthesizeFallback:
                 with aioresponses() as m:
                     m.post(re.compile(r".*audio_query.*"), payload={})
                     m.post(re.compile(r".*synthesis.*"), body=b"recovered-data")
-                    result = await synthesize("テスト", VoiceSettings(speaker_id=99999))
+                    result = await synthesize(
+                        "テスト本文", VoiceSettings(speaker_id=99999)
+                    )
                     assert result == b"recovered-data"
                     mocked_fetch.assert_awaited_once()
         finally:
@@ -1423,7 +1525,7 @@ class TestSynthesizeFallback:
                     re.compile(r"http://engine-b:50021/synthesis.*"),
                     body=b"fallback-ok",
                 )
-                result = await synthesize("テスト", VoiceSettings(speaker_id=99999))
+                result = await synthesize("テスト本文", VoiceSettings(speaker_id=99999))
                 assert result == b"fallback-ok"
         finally:
             bot.speaker_engine.pop(99999, None)
@@ -1574,7 +1676,8 @@ class TestDbOperations:
         ]
         try:
             await bot.load_guild_dicts()
-            assert bot.guild_dicts[30] == {"w": "ダブリュー", "lol": "わらい"}
+            # load_guild_dicts はカタカナ統一する（VOICEVOX is_kana 対応）
+            assert bot.guild_dicts[30] == {"w": "ダブリュー", "lol": "ワライ"}
         finally:
             bot.guild_dicts.pop(30, None)
 
@@ -1604,7 +1707,8 @@ class TestDbOperations:
         original_en = dict(bot._ENGLISH_WORD_READINGS)
         try:
             await bot.load_builtin_reading_dicts()
-            assert bot.apply_reading_corrections("雰囲気") == "ふいんき"
+            # DBから読まれた hiragana も実行時にカタカナ化される
+            assert bot.apply_reading_corrections("雰囲気") == "フインキ"
             assert bot.apply_reading_corrections("home") == "ホームー"
         finally:
             bot._READING_CORRECTIONS.clear()
@@ -1624,7 +1728,7 @@ class TestDbOperations:
         try:
             await bot.load_builtin_reading_dicts()
             conn.executemany.assert_awaited_once()
-            assert bot.apply_reading_corrections("雰囲気") in {"ふんいき", "ふいんき"}
+            assert bot.apply_reading_corrections("雰囲気") in {"フンイキ", "フインキ"}
             assert bot.apply_reading_corrections("home") == "ホーム"
         finally:
             bot._READING_CORRECTIONS.clear()
@@ -1648,11 +1752,11 @@ class TestDbOperations:
         original_en = dict(bot._ENGLISH_WORD_READINGS)
         try:
             await bot.load_builtin_reading_dicts()
-            # DB値が優先される
-            assert bot.apply_reading_corrections("雰囲気") == "ふいんき"
+            # DB値が優先される（hiragana も実行時にカタカナ化）
+            assert bot.apply_reading_corrections("雰囲気") == "フインキ"
             assert bot.apply_reading_corrections("home") == "ホームー"
             # DB未登録のデフォルト語も使える
-            assert bot.apply_reading_corrections("重複") == "ちょうふく"
+            assert bot.apply_reading_corrections("重複") == "チョウフク"
             assert bot.apply_reading_corrections("school") == "スクール"
             # 不足分の投入が走る
             conn.executemany.assert_awaited_once()
@@ -1672,7 +1776,8 @@ class TestDbOperations:
         args = conn.execute.await_args.args
         assert args[1] == 50
         assert args[2] == "abc"
-        assert args[3] == "あいうえお"
+        # 読みは VOICEVOX is_kana 用にカタカナ化されて保存される
+        assert args[3] == "アイウエオ"
 
     async def test_delete_dict_entry_executes(self, mock_db_pool):
         from bot import delete_dict_entry
@@ -2161,7 +2266,7 @@ class TestOnMessageMore:
     async def test_full_flow_synthesizes_and_queues(self, mock_ffmpeg):
         from bot import on_message, play_locks, queues, read_channels
 
-        msg = _make_message(guild_id=10004, content="こんにちは")
+        msg = _make_message(guild_id=10004, content="こんにちは本日")
         read_channels[10004] = msg.channel.id
 
         with aioresponses() as m:
@@ -2180,7 +2285,7 @@ class TestOnMessageMore:
     async def test_synthesize_aiohttp_error_notifies(self):
         from bot import on_message, read_channels
 
-        msg = _make_message(guild_id=10005, content="エラーテスト")
+        msg = _make_message(guild_id=10005, content="エラー試験")
         msg.channel.send = AsyncMock()
         read_channels[10005] = msg.channel.id
 
@@ -3233,13 +3338,13 @@ class TestSharedHttpSession:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"data1")
-                result1 = await synthesize("あ", VoiceSettings())
+                result1 = await synthesize("あ本", VoiceSettings())
                 assert result1 == b"data1"
 
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"data2")
-                result2 = await synthesize("い", VoiceSettings())
+                result2 = await synthesize("い本", VoiceSettings())
                 assert result2 == b"data2"
         finally:
             await close_http_session()
@@ -3435,9 +3540,9 @@ class TestSynthesizeCache:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"cached")
-                r1 = await synthesize("せつぞくしました", VoiceSettings(), cache=True)
+                r1 = await synthesize("接続しました", VoiceSettings(), cache=True)
                 # 2回目はHTTPモック登録なしで呼ぶ → キャッシュヒットで成功するはず
-                r2 = await synthesize("せつぞくしました", VoiceSettings(), cache=True)
+                r2 = await synthesize("接続しました", VoiceSettings(), cache=True)
                 assert r1 == b"cached"
                 assert r2 == b"cached"
         finally:
@@ -3547,7 +3652,7 @@ class TestSynthesizeCache:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"x")
-                await synthesize("キャッシュしない", VoiceSettings())
+                await synthesize("キャッシュ無効", VoiceSettings())
             assert bot._synth_cache == {}
             assert bot._recent_synth_cache != {}
         finally:
@@ -3722,7 +3827,7 @@ class TestSynthesizeCache:
             with aioresponses() as m:
                 m.post(re.compile(r"http://good:50021/audio_query.*"), payload={})
                 m.post(re.compile(r"http://good:50021/synthesis.*"), body=b"ok")
-                result = await synthesize("テスト", VoiceSettings(speaker_id=777))
+                result = await synthesize("テスト本文", VoiceSettings(speaker_id=777))
                 assert result == b"ok"
 
                 bad_calls = [
@@ -3756,7 +3861,7 @@ class TestSynthesizeCache:
 
             with patch("bot._synthesize_with_candidate", new=AsyncMock()) as mocked_syn:
                 with pytest.raises(aiohttp.ClientError, match="バックオフ中"):
-                    await synthesize("テスト", VoiceSettings(speaker_id=777))
+                    await synthesize("テスト本文", VoiceSettings(speaker_id=777))
                 mocked_syn.assert_not_awaited()
         finally:
             bot.speaker_engine.clear()
@@ -3914,7 +4019,7 @@ class TestSynthesizeOutputFormat:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"x")
-                await synthesize("テスト", VoiceSettings())
+                await synthesize("テスト本文", VoiceSettings())
                 # synthesis のリクエストボディを検証
                 synthesis_call = list(m.requests.values())[1][0]
                 body = synthesis_call.kwargs["json"]
@@ -4467,10 +4572,11 @@ def fixed_builtin_readings(monkeypatch):
     """
     import bot
 
+    # builtin 辞書はカタカナ統一前提（VOICEVOX is_kana 用）
     monkeypatch.setattr(
         bot,
         "_READING_CORRECTIONS",
-        {"テスト語": "てすとご", "重複漢字": "ちょうふくかんじ"},
+        {"テスト語": "テストゴ", "重複漢字": "チョウフクカンジ"},
     )
     monkeypatch.setattr(
         bot,
@@ -4483,18 +4589,18 @@ class TestBuiltinDuplicateDetection:
     def test_returns_true_for_jp_exact_match(self, fixed_builtin_readings):
         import bot
 
-        assert bot._is_builtin_duplicate("テスト語", "てすとご") is True
+        assert bot._is_builtin_duplicate("テスト語", "テストゴ") is True
 
     def test_returns_false_when_reading_differs(self, fixed_builtin_readings):
         import bot
 
         # 1文字でも違えば登録可（ユーザー上書き）
-        assert bot._is_builtin_duplicate("テスト語", "てすご") is False
+        assert bot._is_builtin_duplicate("テスト語", "テスゴ") is False
 
     def test_returns_false_for_unknown_word(self, fixed_builtin_readings):
         import bot
 
-        assert bot._is_builtin_duplicate("ぜんぜん知らない単語", "なに") is False
+        assert bot._is_builtin_duplicate("ぜんぜん知らない単語", "ナニ") is False
 
     def test_returns_true_for_english_case_insensitive(self, fixed_builtin_readings):
         import bot
@@ -4536,7 +4642,8 @@ class TestAddDictEntryRejectsDuplicates:
             ok = await bot.add_dict_entry(8502, "テスト語", "てすご")
             assert ok is True
             conn.execute.assert_awaited_once()
-            assert bot.guild_dicts[8502]["テスト語"] == "てすご"
+            # 入力 hiragana は保存時にカタカナへ統一
+            assert bot.guild_dicts[8502]["テスト語"] == "テスゴ"
         finally:
             bot.guild_dicts.pop(8502, None)
 
@@ -4561,19 +4668,20 @@ class TestPurgeBuiltinDuplicates:
         import bot
 
         _, conn = mock_db_pool
+        # 実運用では load_guild_dicts でカタカナに統一されているのを想定
         bot.guild_dicts[8601] = {
-            "テスト語": "てすとご",  # builtin と完全一致 → 削除
-            "テスト語2": "てすご",  # word 違い → 残す
-            "重複漢字": "ちょうふくかんじ",  # builtin と完全一致 → 削除
-            "独自語": "どくじご",  # builtin になし → 残す
+            "テスト語": "テストゴ",  # builtin と完全一致 → 削除
+            "テスト語2": "テスゴ",  # word 違い → 残す
+            "重複漢字": "チョウフクカンジ",  # builtin と完全一致 → 削除
+            "独自語": "ドクジゴ",  # builtin になし → 残す
         }
         try:
             count = await bot.purge_builtin_duplicates_from_user_dicts()
             assert count == 2
             assert "テスト語" not in bot.guild_dicts.get(8601, {})
             assert "重複漢字" not in bot.guild_dicts.get(8601, {})
-            assert bot.guild_dicts[8601]["テスト語2"] == "てすご"
-            assert bot.guild_dicts[8601]["独自語"] == "どくじご"
+            assert bot.guild_dicts[8601]["テスト語2"] == "テスゴ"
+            assert bot.guild_dicts[8601]["独自語"] == "ドクジゴ"
             conn.executemany.assert_awaited_once()
         finally:
             bot.guild_dicts.pop(8601, None)
@@ -4599,7 +4707,7 @@ class TestPurgeBuiltinDuplicates:
         """全エントリが重複だった場合は guild key 自体を消す"""
         import bot
 
-        bot.guild_dicts[8603] = {"テスト語": "てすとご"}
+        bot.guild_dicts[8603] = {"テスト語": "テストゴ"}
         try:
             await bot.purge_builtin_duplicates_from_user_dicts()
             assert 8603 not in bot.guild_dicts
@@ -4613,8 +4721,8 @@ class TestPurgeBuiltinDuplicates:
         import bot
 
         bot.guild_dicts[8604] = {
-            "テスト語": "てすとご",
-            "残る語": "のこるご",
+            "テスト語": "テストゴ",
+            "残る語": "ノコルゴ",
         }
         # cache を仮に登録しておく
         import re
@@ -4637,7 +4745,7 @@ class TestPurgeBuiltinDuplicates:
         _, conn = mock_db_pool
         conn.executemany = AsyncMock(side_effect=RuntimeError("db down"))
 
-        bot.guild_dicts[8605] = {"テスト語": "てすとご"}
+        bot.guild_dicts[8605] = {"テスト語": "テストゴ"}
         try:
             with caplog.at_level("WARNING"):
                 count = await bot.purge_builtin_duplicates_from_user_dicts()
