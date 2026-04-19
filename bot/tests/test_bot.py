@@ -56,7 +56,7 @@ class TestSynthesize:
                 re.compile(r"http://test-voicevox:50021/synthesis"),
                 body=b"fake-wav-data",
             )
-            result = await synthesize("テスト本文", VoiceSettings())
+            result = await synthesize("テスト", VoiceSettings())
             assert result == b"fake-wav-data"
 
     async def test_raises_on_api_error(self):
@@ -68,7 +68,7 @@ class TestSynthesize:
                 status=500,
             )
             with pytest.raises(Exception):
-                await synthesize("テスト本文", VoiceSettings())
+                await synthesize("テスト", VoiceSettings())
 
     async def test_applies_voice_params(self):
         from bot import VoiceSettings, synthesize
@@ -90,7 +90,7 @@ class TestSynthesize:
                 re.compile(r"http://test-voicevox:50021/synthesis"),
                 body=b"fake-wav-data",
             )
-            result = await synthesize("テスト本文", settings)
+            result = await synthesize("テスト", settings)
             assert result == b"fake-wav-data"
 
             # synthesis に送られたリクエストボディのパラメータを検証
@@ -100,106 +100,6 @@ class TestSynthesize:
             assert body["pitchScale"] == 0.1
             assert body["intonationScale"] == 1.2
             assert body["volumeScale"] == 0.8
-
-
-class TestIsKanaOnlyText:
-    """純カナ列判定（is_kana=true 経路の入口）"""
-
-    def test_pure_katakana_is_true(self):
-        from bot import _is_kana_only_text
-
-        assert _is_kana_only_text("テスト") is True
-        assert _is_kana_only_text("ダイヨンキョウサツ") is True
-
-    def test_pure_hiragana_is_true(self):
-        from bot import _is_kana_only_text
-
-        assert _is_kana_only_text("こんにちは") is True
-
-    def test_kana_with_punct_is_true(self):
-        from bot import _is_kana_only_text
-
-        assert _is_kana_only_text("テスト、ですー！") is True
-
-    def test_kanji_mixed_is_false(self):
-        from bot import _is_kana_only_text
-
-        assert _is_kana_only_text("こんにちは本日") is False
-
-    def test_ascii_mixed_is_false(self):
-        from bot import _is_kana_only_text
-
-        assert _is_kana_only_text("テスト1") is False
-        assert _is_kana_only_text("テストA") is False
-
-    def test_empty_is_false(self):
-        from bot import _is_kana_only_text
-
-        assert _is_kana_only_text("") is False
-
-
-class TestSynthesizeKanaMode:
-    """純カナ列は /accent_phrases?is_kana=true 経路で送る。
-
-    morpheme 解析による読み崩れ（「ダイヨン」→「ダイシ」等）を防ぐ。
-    """
-
-    async def test_pure_kana_uses_accent_phrases_endpoint(self):
-        from bot import VoiceSettings, synthesize
-
-        with aioresponses() as m:
-            m.post(
-                re.compile(r"http://test-voicevox:50021/accent_phrases.*"),
-                payload=[],
-            )
-            m.post(
-                re.compile(r"http://test-voicevox:50021/synthesis"),
-                body=b"wav",
-            )
-            result = await synthesize("テスト", VoiceSettings())
-            assert result == b"wav"
-
-            # 1件目のリクエスト = /accent_phrases、is_kana=true / カタカナ化された text
-            req = list(m.requests.values())[0][0]
-            params = req.kwargs["params"]
-            assert params["is_kana"] == "true"
-            assert params["text"] == "テスト"
-
-            # /audio_query は呼ばれない
-            assert not any("audio_query" in str(k) for k in m.requests)
-
-    async def test_pure_hiragana_is_converted_to_katakana_for_engine(self):
-        """ひらがなで届いた user 辞書値もエンジンへはカタカナで送る"""
-        from bot import VoiceSettings, synthesize
-
-        with aioresponses() as m:
-            m.post(
-                re.compile(r"http://test-voicevox:50021/accent_phrases.*"),
-                payload=[],
-            )
-            m.post(
-                re.compile(r"http://test-voicevox:50021/synthesis"),
-                body=b"wav",
-            )
-            await synthesize("こんにちは", VoiceSettings())
-            req = list(m.requests.values())[0][0]
-            assert req.kwargs["params"]["text"] == "コンニチハ"
-
-    async def test_kanji_mixed_uses_audio_query(self):
-        from bot import VoiceSettings, synthesize
-
-        with aioresponses() as m:
-            m.post(
-                re.compile(r"http://test-voicevox:50021/audio_query.*"),
-                payload={"accent_phrases": []},
-            )
-            m.post(
-                re.compile(r"http://test-voicevox:50021/synthesis"),
-                body=b"wav",
-            )
-            await synthesize("こんにちは本日", VoiceSettings())
-            assert any("audio_query" in str(k) for k in m.requests)
-            assert not any("accent_phrases" in str(k) for k in m.requests)
 
 
 class TestVoiceSettings:
@@ -1103,7 +1003,7 @@ class TestEngines:
 
         monkeypatch.setattr("bot.ENGINES", [])
         with pytest.raises(RuntimeError):
-            await synthesize("テスト本文", VoiceSettings())
+            await synthesize("テスト", VoiceSettings())
 
 
 class TestReadChannels:
@@ -1443,7 +1343,7 @@ class TestSynthesizeFallback:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"fallback-data")
-                result = await synthesize("テスト本文", VoiceSettings(speaker_id=99999))
+                result = await synthesize("テスト", VoiceSettings(speaker_id=99999))
                 assert result == b"fallback-data"
                 audio_query_call = list(m.requests.values())[0][0]
                 assert audio_query_call.kwargs["params"]["speaker"] == 3
@@ -1463,7 +1363,7 @@ class TestSynthesizeFallback:
                 with aioresponses() as m:
                     m.post(re.compile(r".*audio_query.*"), status=500)
                     with pytest.raises(aiohttp.ClientError):
-                        await synthesize("テスト本文", VoiceSettings(speaker_id=99999))
+                        await synthesize("テスト", VoiceSettings(speaker_id=99999))
         finally:
             bot._last_speaker_refresh_attempt = original_last_attempt
 
@@ -1477,7 +1377,7 @@ class TestSynthesizeFallback:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"mapped-data")
-                result = await synthesize("テスト本文", VoiceSettings(speaker_id=10003))
+                result = await synthesize("テスト", VoiceSettings(speaker_id=10003))
                 assert result == b"mapped-data"
                 audio_query_call = list(m.requests.values())[0][0]
                 assert audio_query_call.kwargs["params"]["speaker"] == 99
@@ -1525,7 +1425,7 @@ class TestSynthesizeFallback:
                     re.compile(r"http://engine-b:50021/synthesis.*"),
                     body=b"fallback-ok",
                 )
-                result = await synthesize("テスト本文", VoiceSettings(speaker_id=99999))
+                result = await synthesize("テスト", VoiceSettings(speaker_id=99999))
                 assert result == b"fallback-ok"
         finally:
             bot.speaker_engine.pop(99999, None)
@@ -2266,7 +2166,7 @@ class TestOnMessageMore:
     async def test_full_flow_synthesizes_and_queues(self, mock_ffmpeg):
         from bot import on_message, play_locks, queues, read_channels
 
-        msg = _make_message(guild_id=10004, content="こんにちは本日")
+        msg = _make_message(guild_id=10004, content="こんにちは")
         read_channels[10004] = msg.channel.id
 
         with aioresponses() as m:
@@ -2285,7 +2185,7 @@ class TestOnMessageMore:
     async def test_synthesize_aiohttp_error_notifies(self):
         from bot import on_message, read_channels
 
-        msg = _make_message(guild_id=10005, content="エラー試験")
+        msg = _make_message(guild_id=10005, content="エラーテスト")
         msg.channel.send = AsyncMock()
         read_channels[10005] = msg.channel.id
 
@@ -3338,13 +3238,13 @@ class TestSharedHttpSession:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"data1")
-                result1 = await synthesize("あ本", VoiceSettings())
+                result1 = await synthesize("あ", VoiceSettings())
                 assert result1 == b"data1"
 
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"data2")
-                result2 = await synthesize("い本", VoiceSettings())
+                result2 = await synthesize("い", VoiceSettings())
                 assert result2 == b"data2"
         finally:
             await close_http_session()
@@ -3540,9 +3440,9 @@ class TestSynthesizeCache:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"cached")
-                r1 = await synthesize("接続しました", VoiceSettings(), cache=True)
+                r1 = await synthesize("せつぞくしました", VoiceSettings(), cache=True)
                 # 2回目はHTTPモック登録なしで呼ぶ → キャッシュヒットで成功するはず
-                r2 = await synthesize("接続しました", VoiceSettings(), cache=True)
+                r2 = await synthesize("せつぞくしました", VoiceSettings(), cache=True)
                 assert r1 == b"cached"
                 assert r2 == b"cached"
         finally:
@@ -3652,7 +3552,7 @@ class TestSynthesizeCache:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"x")
-                await synthesize("キャッシュ無効", VoiceSettings())
+                await synthesize("キャッシュしない", VoiceSettings())
             assert bot._synth_cache == {}
             assert bot._recent_synth_cache != {}
         finally:
@@ -3827,7 +3727,7 @@ class TestSynthesizeCache:
             with aioresponses() as m:
                 m.post(re.compile(r"http://good:50021/audio_query.*"), payload={})
                 m.post(re.compile(r"http://good:50021/synthesis.*"), body=b"ok")
-                result = await synthesize("テスト本文", VoiceSettings(speaker_id=777))
+                result = await synthesize("テスト", VoiceSettings(speaker_id=777))
                 assert result == b"ok"
 
                 bad_calls = [
@@ -3861,7 +3761,7 @@ class TestSynthesizeCache:
 
             with patch("bot._synthesize_with_candidate", new=AsyncMock()) as mocked_syn:
                 with pytest.raises(aiohttp.ClientError, match="バックオフ中"):
-                    await synthesize("テスト本文", VoiceSettings(speaker_id=777))
+                    await synthesize("テスト", VoiceSettings(speaker_id=777))
                 mocked_syn.assert_not_awaited()
         finally:
             bot.speaker_engine.clear()
@@ -4019,7 +3919,7 @@ class TestSynthesizeOutputFormat:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
                 m.post(re.compile(r".*synthesis.*"), body=b"x")
-                await synthesize("テスト本文", VoiceSettings())
+                await synthesize("テスト", VoiceSettings())
                 # synthesis のリクエストボディを検証
                 synthesis_call = list(m.requests.values())[1][0]
                 body = synthesis_call.kwargs["json"]

@@ -1875,24 +1875,6 @@ async def _build_synthesis_candidates(
     return candidates
 
 
-def _is_kana_only_text(text: str) -> bool:
-    """text が VOICEVOX の AquesTalk 表記として送れる純カナ列かを判定する。
-
-    全文字がカナ + 記号（句読点・空白・伸ばし棒など）なら True。
-    これが True の時、`/audio_query` の morpheme 解析で読みが書き換えられる
-    （「ダイヨン」→「ダイシ」等）のを避けるため `is_kana=true` モードで合成する。
-    """
-    if not text:
-        return False
-    allowed_punct = set(" 　、。！？!?・ー〜~,.\n")
-    return all(
-        ("\u30a0" <= ch <= "\u30ff")  # カタカナ
-        or ("\u3040" <= ch <= "\u309f")  # ひらがな
-        or ch in allowed_punct
-        for ch in text
-    )
-
-
 async def _synthesize_with_candidate(
     engine_url: str,
     real_id: int,
@@ -1901,48 +1883,24 @@ async def _synthesize_with_candidate(
 ) -> bytes:
     """指定候補で音声合成を1回実行する。
 
-    text が純カナ列の場合は `/accent_phrases?is_kana=true` で morpheme 解析を
-    バイパスし、辞書登録の読みが VOICEVOX に書き換えられるのを防ぐ。
-    漢字混じりテキストは従来通り `/audio_query` で自然な抑揚を得る。
+    辞書値はカタカナで保存されているため、apply_reading_corrections 適用後の
+    text はカタカナ部分が多く、OpenJTalk が漢字を再解析する余地が小さい。
+    （`is_kana=true` モードは AquesTalk 表記＋アクセント記号必須で本番投入できず）
     """
     session = await get_http_session()
-    if _is_kana_only_text(text):
-        # AquesTalk 表記前提のため text をカタカナ化（ひらがな入力にも対応）
-        kana_text = to_katakana(text)
-        # 1) /accent_phrases で is_kana=true で読み専用に解析
-        async with session.post(
-            f"{engine_url}/accent_phrases",
-            params={"text": kana_text, "speaker": real_id, "is_kana": "true"},
-        ) as resp:
-            resp.raise_for_status()
-            accent_phrases = await resp.json()
-        # 2) audio_query 構造を手組みする（/audio_query を経由しない）
-        query = {
-            "accent_phrases": accent_phrases,
-            "speedScale": settings.speed,
-            "pitchScale": settings.pitch,
-            "intonationScale": settings.intonation,
-            "volumeScale": settings.volume,
-            "prePhonemeLength": 0.1,
-            "postPhonemeLength": 0.1,
-            "outputSamplingRate": _DISCORD_SAMPLE_RATE,
-            "outputStereo": True,
-            "kana": kana_text,
-        }
-    else:
-        params = {"text": text, "speaker": real_id}
-        async with session.post(f"{engine_url}/audio_query", params=params) as resp:
-            resp.raise_for_status()
-            query = await resp.json()
-        # ユーザーの音声パラメータを適用
-        query["speedScale"] = settings.speed
-        query["pitchScale"] = settings.pitch
-        query["intonationScale"] = settings.intonation
-        query["volumeScale"] = settings.volume
-        # Discord 互換フォーマットを直接要求 → ffmpeg 経由の変換を省略可能にする
-        # 未対応エンジンは無視するのでデフォルトフォーマットで返る（FFmpeg で再生）
-        query["outputSamplingRate"] = _DISCORD_SAMPLE_RATE
-        query["outputStereo"] = True
+    params = {"text": text, "speaker": real_id}
+    async with session.post(f"{engine_url}/audio_query", params=params) as resp:
+        resp.raise_for_status()
+        query = await resp.json()
+    # ユーザーの音声パラメータを適用
+    query["speedScale"] = settings.speed
+    query["pitchScale"] = settings.pitch
+    query["intonationScale"] = settings.intonation
+    query["volumeScale"] = settings.volume
+    # Discord 互換フォーマットを直接要求 → ffmpeg 経由の変換を省略可能にする
+    # 未対応エンジンは無視するのでデフォルトフォーマットで返る（FFmpeg で再生）
+    query["outputSamplingRate"] = _DISCORD_SAMPLE_RATE
+    query["outputStereo"] = True
 
     async with session.post(
         f"{engine_url}/synthesis",
