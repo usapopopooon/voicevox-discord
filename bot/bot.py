@@ -108,7 +108,9 @@ DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
 DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "5"))
 
 # TTS の待ち時間上限（ハング時の体感遅延を抑える）
-TTS_AUDIO_QUERY_TIMEOUT_SECONDS = float(os.getenv("TTS_AUDIO_QUERY_TIMEOUT_SECONDS", "3"))
+TTS_AUDIO_QUERY_TIMEOUT_SECONDS = float(
+    os.getenv("TTS_AUDIO_QUERY_TIMEOUT_SECONDS", "3")
+)
 TTS_SYNTHESIS_TIMEOUT_SECONDS = float(os.getenv("TTS_SYNTHESIS_TIMEOUT_SECONDS", "8"))
 
 # 子プロセスの自動再起動（指数バックオフ + クラッシュループ検出）
