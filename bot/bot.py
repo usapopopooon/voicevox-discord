@@ -107,6 +107,10 @@ _migrations_ran = False
 DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
 DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "5"))
 
+# TTS の待ち時間上限（ハング時の体感遅延を抑える）
+TTS_AUDIO_QUERY_TIMEOUT_SECONDS = float(os.getenv("TTS_AUDIO_QUERY_TIMEOUT_SECONDS", "3"))
+TTS_SYNTHESIS_TIMEOUT_SECONDS = float(os.getenv("TTS_SYNTHESIS_TIMEOUT_SECONDS", "8"))
+
 # 子プロセスの自動再起動（指数バックオフ + クラッシュループ検出）
 BOT_RESTART_BACKOFF_MAX_SECONDS = 60
 BOT_CRASH_WINDOW_SECONDS = 300
@@ -960,7 +964,7 @@ _SYNTH_CACHE_MAX = 32
 # 1件あたり最大 ~500KB。max=16 で ~8MB 上限。
 _recent_synth_cache: OrderedDict[tuple, tuple[float, bytes]] = OrderedDict()
 _RECENT_SYNTH_CACHE_MAX = 16
-_RECENT_SYNTH_TTL_SECONDS = 20.0
+_RECENT_SYNTH_TTL_SECONDS = float(os.getenv("RECENT_SYNTH_TTL_SECONDS", "45"))
 # 同じキーで同時に合成が走らないよう in-flight 管理
 _synth_in_flight: dict[tuple, asyncio.Event] = {}
 # 失敗した合成候補の短期バックオフ（engine_url, real_id）-> monotonic deadline
@@ -1637,8 +1641,9 @@ def clean_text(text: str) -> str:
     顔文字（長一致優先）→ 横向き顔文字（境界付き）→ 日本語ネットスラング
     → デコ記号 → Unicode絵文字
     → 肌色修飾子正規化 → URL/メール/カスタム絵文字 の順で置換する。"""
-    text = _replace_kaomoji(text)
+    # 顔文字パターンは巨大なので、括弧が無い通常文では regex 走査を避ける
     if _contains_any_char(text, _KAOMOJI_OPENERS):
+        text = _replace_kaomoji(text)
         text = _replace_kaomoji_variant(text)
     if _contains_any_char(text, _WESTERN_EMOTICON_TRIGGER_CHARS):
         text = _replace_western_emoticon(text)
@@ -1889,7 +1894,11 @@ async def _synthesize_with_candidate(
     """
     session = await get_http_session()
     params = {"text": text, "speaker": real_id}
-    async with session.post(f"{engine_url}/audio_query", params=params) as resp:
+    async with session.post(
+        f"{engine_url}/audio_query",
+        params=params,
+        timeout=aiohttp.ClientTimeout(total=TTS_AUDIO_QUERY_TIMEOUT_SECONDS),
+    ) as resp:
         resp.raise_for_status()
         query = await resp.json()
     # ユーザーの音声パラメータを適用
@@ -1907,6 +1916,7 @@ async def _synthesize_with_candidate(
         params={"speaker": real_id},
         json=query,
         headers={"Content-Type": "application/json"},
+        timeout=aiohttp.ClientTimeout(total=TTS_SYNTHESIS_TIMEOUT_SECONDS),
     ) as resp:
         resp.raise_for_status()
         return await resp.read()
@@ -2182,26 +2192,30 @@ async def on_ready():
     await load_user_settings()
     await load_guild_dicts()
     await load_guild_mutes()
-    # ビルドイン辞書と完全重複するユーザー辞書を掃除（ビルドイン拡充への追従）。
-    # 失敗しても on_ready の後続処理を巻き添えにしない（次起動で再試行）。
-    try:
-        await purge_builtin_duplicates_from_user_dicts()
-    except Exception as e:
-        logger.warning(f"ビルドイン重複ユーザー辞書の掃除でエラー: {e}")
-    await tree.sync()
+    # 起動高速化のため一時無効化:
+    # - ビルドイン重複ユーザー辞書の掃除（DB全件走査 + DELETE）
+    # try:
+    #     await purge_builtin_duplicates_from_user_dicts()
+    # except Exception as e:
+    #     logger.warning(f"ビルドイン重複ユーザー辞書の掃除でエラー: {e}")
+    #
+    # - スラッシュコマンド同期（Discord API 呼び出し）
+    # await tree.sync()
     logger.info(f"Botログイン: {client.user} (ID: {client.user.id})")
-    logger.info("スラッシュコマンドを同期しました")
+    logger.info("起動高速化モード: 一部の初期化処理をスキップしています")
 
-    try:
-        await fetch_speakers()
-    except Exception as e:
-        logger.warning(f"スピーカー一覧の取得に失敗しました: {e}")
+    # 起動高速化のため一時無効化:
+    # - スピーカー一覧の事前取得（各TTSエンジンへのHTTPアクセス）
+    # try:
+    #     await fetch_speakers()
+    # except Exception as e:
+    #     logger.warning(f"スピーカー一覧の取得に失敗しました: {e}")
 
     # 起動時の VC 復旧（プロセス再起動・デプロイ後の復帰用）
     # fetch_speakers より後にすることで TTS が使えない状態での接続を避ける。
     # background 化して on_ready 自体は即座に return（ゲートウェイ再接続時の
     # on_ready 再発火と長時間 await の重複を避ける）
-    _spawn_background(_restore_voice_sessions_on_startup())
+    # _spawn_background(_restore_voice_sessions_on_startup())
 
 
 @client.event
@@ -2766,7 +2780,8 @@ async def on_message(message: discord.Message):
 
     # 辞書で置換（ユーザ辞書が先、built-in は後でユーザ側が優先）
     text = apply_dict(message.guild.id, text)
-    text = apply_reading_corrections(text)
+    # 通常運用の応答速度を優先するため、重い built-in 読み補正は一時無効化。
+    # text = apply_reading_corrections(text)
 
     # 長すぎるメッセージは切り詰め
     if len(text) > MAX_READ_LENGTH:
