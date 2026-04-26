@@ -262,6 +262,7 @@ _CJK_COMPAT_UNIT_READINGS: dict[str, str] = {
     if (nfkc := unicodedata.normalize("NFKC", chr(c))) != chr(c) and _is_kana_only(nfkc)
 }
 READING_CORRECTIONS.update(_CJK_COMPAT_UNIT_READINGS)
+del _CJK_COMPAT_UNIT_READINGS
 
 
 # CJK 互換単位記号のうち、NFKC で Latin (Hz, kg, mm 等) に分解されるものの
@@ -373,6 +374,7 @@ _CJK_COMPAT_LATIN_UNIT_READINGS: dict[str, str] = {
     "㏝": "ウェーバー",
 }
 READING_CORRECTIONS.update(_CJK_COMPAT_LATIN_UNIT_READINGS)
+del _CJK_COMPAT_LATIN_UNIT_READINGS
 
 
 # 科学・数学・工学・医学分野の専門用語で TTS が誤読しがちなもの。
@@ -676,6 +678,7 @@ _SCITECH_MEDICAL_READINGS: dict[str, str] = {
     "漢方薬": "カンポウヤク",
 }
 READING_CORRECTIONS.update(_SCITECH_MEDICAL_READINGS)
+del _SCITECH_MEDICAL_READINGS
 
 
 # 少年漫画 (北斗の拳・グラップラー刃牙・魁!!男塾) 由来の固有用語/技/名前。
@@ -799,6 +802,7 @@ _MANGA_READINGS: dict[str, str] = {
     "勇猛果敢": "ユウモウカカン",
 }
 READING_CORRECTIONS.update(_MANGA_READINGS)
+del _MANGA_READINGS
 
 
 # 鬼滅の刃 (Demon Slayer / Kimetsu no Yaiba)。
@@ -892,6 +896,7 @@ _DEMON_SLAYER_READINGS: dict[str, str] = {
     "真菰": "マコモ",
 }
 READING_CORRECTIONS.update(_DEMON_SLAYER_READINGS)
+del _DEMON_SLAYER_READINGS
 
 
 # 他の主要少年漫画の固有読み (WebSearch で公式表記を確認したもの)。
@@ -1072,6 +1077,7 @@ _OTHER_MANGA_READINGS: dict[str, str] = {
     "万物の声": "バンブツノコエ",
 }
 READING_CORRECTIONS.update(_OTHER_MANGA_READINGS)
+del _OTHER_MANGA_READINGS
 
 
 # 中華料理（日本のメニューで頻出）。日本では原語の音訳カナ表記が定着しているため、
@@ -1146,6 +1152,7 @@ _CHINESE_CUISINE_READINGS: dict[str, str] = {
     "黒酢": "クロズ",
 }
 READING_CORRECTIONS.update(_CHINESE_CUISINE_READINGS)
+del _CHINESE_CUISINE_READINGS
 
 
 # 英検2級クラスでよく使う英単語の built-in 読み補正（単語境界つき、大小無視）。
@@ -1809,9 +1816,9 @@ JHS_CORE_ENGLISH_READINGS: dict[str, str] = {
     "why": "ホワイ",
 }
 ENGLISH_WORD_READINGS.update(JHS_CORE_ENGLISH_READINGS)
+del JHS_CORE_ENGLISH_READINGS
 
 __all__ = [
     "READING_CORRECTIONS",
     "ENGLISH_WORD_READINGS",
-    "JHS_CORE_ENGLISH_READINGS",
 ]

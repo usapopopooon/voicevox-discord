@@ -10,7 +10,9 @@ import time
 import unicodedata
 import wave
 from collections import OrderedDict, deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 import aiohttp
 import asyncpg
@@ -136,8 +138,24 @@ logger.info(f"TTS_ENGINES: {[(n, u) for n, u, _ in ENGINES]}")
 logger.info(f"DEFAULT_SPEAKER_ID: {DEFAULT_SPEAKER}")
 
 # Intents設定（message_contentはテキスト読み上げに必須）
+# 使っていないイベント・キャッシュ起因のメモリを抑えるため不要 intent を
+# 明示的に OFF にする。
 intents = discord.Intents.default()
 intents.message_content = True
+intents.typing = False
+intents.guild_reactions = False
+intents.dm_reactions = False
+# DM メッセージは `on_message` で `if not message.guild: return` で弾いており、
+# Bot として DM 機能を提供していないため OFF。将来 DM 経由の機能を追加する
+# 場合はここを True に戻すこと。
+intents.dm_messages = False
+intents.bans = False
+intents.integrations = False
+intents.invites = False
+intents.webhooks = False
+intents.emojis_and_stickers = False
+intents.guild_scheduled_events = False
+intents.auto_moderation = False
 
 # 共有 HTTP セッション（Keep-Alive で接続再利用）
 _http_session: aiohttp.ClientSession | None = None
@@ -170,7 +188,15 @@ class TtsClient(discord.Client):
 # chunk_guilds_at_startup=False: 起動時に全ギルドのメンバーを一括キャッシュしない
 # （大規模ギルドで数十〜数百MB節約）。必要時は guild.get_member() で参照し、
 # キャッシュミスは None 許容のため現状コードと互換。
-client = TtsClient(intents=intents, chunk_guilds_at_startup=False)
+# max_messages: 受信メッセージのキャッシュ件数。デフォルト 1000 件は読み上げ用途に
+# 過剰で message_content=True と相まってメモリを大きく食うため小さく絞る。
+# 編集/削除イベントのキャッシュ参照は本Botでは利用していない。
+DISCORD_MESSAGE_CACHE_SIZE = int(os.getenv("DISCORD_MESSAGE_CACHE_SIZE", "100"))
+client = TtsClient(
+    intents=intents,
+    chunk_guilds_at_startup=False,
+    max_messages=DISCORD_MESSAGE_CACHE_SIZE,
+)
 tree = app_commands.CommandTree(client)
 
 # ギルドあたりの再生キュー最大長。1件あたり最大 ~500KB なので maxlen=64 で ~32MB 上限。
@@ -484,7 +510,9 @@ _WESTERN_EMOTICON_PATTERN = re.compile(
 # 顔文字辞書（ビルドイン）。
 # もともと kaomoji.json で管理していた辞書をコード内に同梱し、
 # 起動時ファイルI/Oをなくしてデプロイ環境依存を減らす。
-_KAOMOJI_DICT: dict[str, str] = dict(_BUILTIN_KAOMOJI_DICT)
+# `_BUILTIN_KAOMOJI_DICT` を直接借用してコピーを増やさない
+# （3,000+ 件の二重保持を避ける）。以後 `_KAOMOJI_DICT` がただ一つの実体。
+_KAOMOJI_DICT: dict[str, str] = _BUILTIN_KAOMOJI_DICT
 # curated な基本形を優先（上書き可能）。ビルドイン辞書側の long-form と
 # 重複しにくいシンプル形を中心に登録している。
 _KAOMOJI_DICT.update(_BASIC_KAOMOJI)
@@ -521,17 +549,21 @@ def _rebuild_kaomoji_patterns() -> None:
 
     現状は起動時 1 回しか呼ばれないが、将来 DB 連動で kaomoji を動的追加する時に
     備えて一元化しておく。
+
+    `_KAOMOJI_NORMALIZED_DICT` には「正規化で表記が変わるキー」だけを登録する。
+    正規化結果が元キーと同一なエントリは `_replace_kaomoji` で `_KAOMOJI_PATTERN`
+    経由で先に拾われるので、別 dict に重複保持する必要がない（数千件分の節約）。
     """
     global _KAOMOJI_NORMALIZED_MAX_LEN, _KAOMOJI_PATTERN
 
     _KAOMOJI_NORMALIZED_DICT.clear()
     for face, reading in _KAOMOJI_DICT.items():
         normalized = _normalize_kaomoji_for_lookup(face)
+        if normalized == face:
+            continue
         _KAOMOJI_NORMALIZED_DICT.setdefault(normalized, reading)
-    _KAOMOJI_NORMALIZED_MAX_LEN = (
-        max((len(k) for k in _KAOMOJI_NORMALIZED_DICT), default=0)
-        if _KAOMOJI_DICT
-        else 0
+    _KAOMOJI_NORMALIZED_MAX_LEN = max(
+        (len(k) for k in _KAOMOJI_NORMALIZED_DICT), default=0
     )
     if _KAOMOJI_DICT:
         _KAOMOJI_PATTERN = re.compile(
@@ -824,10 +856,17 @@ def _normalize_emoji_modifiers(text: str) -> str:
 _READING_CORRECTIONS: dict[str, str] = dict(_BUILTIN_READING_CORRECTIONS)
 _ENGLISH_WORD_READINGS: dict[str, str] = dict(_BUILTIN_ENGLISH_WORD_READINGS)
 
-# built-in 読み辞書のデフォルトスナップショット。
+# built-in 読み辞書のデフォルトスナップショットへの読み取り専用ビュー。
 # DB初期投入やフォールバックで利用する（runtime dict の変更に影響されない）。
-_DEFAULT_READING_CORRECTIONS: dict[str, str] = dict(_BUILTIN_READING_CORRECTIONS)
-_DEFAULT_ENGLISH_WORD_READINGS: dict[str, str] = dict(_BUILTIN_ENGLISH_WORD_READINGS)
+# `MappingProxyType` でラップしてあるため、誤って `_DEFAULT_*[k] = v` などの
+# 書き込みを行うと TypeError になり、`readings_builtin` 本体への意図しない
+# 副作用を防ぐ。dict コピーを増やさないので追加メモリ消費はほぼゼロ。
+_DEFAULT_READING_CORRECTIONS: Mapping[str, str] = MappingProxyType(
+    _BUILTIN_READING_CORRECTIONS
+)
+_DEFAULT_ENGLISH_WORD_READINGS: Mapping[str, str] = MappingProxyType(
+    _BUILTIN_ENGLISH_WORD_READINGS
+)
 
 
 def _english_base_form(word: str) -> str | None:
@@ -1643,7 +1682,11 @@ def clean_text(text: str) -> str:
     顔文字（長一致優先）→ 横向き顔文字（境界付き）→ 日本語ネットスラング
     → デコ記号 → Unicode絵文字
     → 肌色修飾子正規化 → URL/メール/カスタム絵文字 の順で置換する。"""
-    # 顔文字パターンは巨大なので、括弧が無い通常文では regex 走査を避ける
+    # 顔文字パターンは巨大なので、括弧が無い通常文では regex 走査を避ける。
+    # 呼び出し順序は `_replace_kaomoji` → `_replace_kaomoji_variant` で固定。
+    # `_KAOMOJI_NORMALIZED_DICT` は「正規化で表記が変わるキー」のみ保持する縮小
+    # 版なので、生キー（normalized==face）の置換は前段の `_replace_kaomoji` に
+    # 依存している。順序を入れ替えたり片方だけ呼ぶと拾えない顔文字が出る点に注意。
     if _contains_any_char(text, _KAOMOJI_OPENERS):
         text = _replace_kaomoji(text)
         text = _replace_kaomoji_variant(text)
