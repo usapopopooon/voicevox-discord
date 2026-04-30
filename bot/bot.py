@@ -2249,6 +2249,11 @@ async def on_ready():
     logger.info(f"Botログイン: {client.user} (ID: {client.user.id})")
     logger.info("起動高速化モード: 一部の初期化処理をスキップしています")
 
+    try:
+        await client.change_presence(activity=discord.CustomActivity(name="読み上げ中"))
+    except Exception as e:
+        logger.warning(f"プレゼンス設定に失敗: {e}")
+
     # 起動高速化のため一時無効化:
     # - スピーカー一覧の事前取得（各TTSエンジンへのHTTPアクセス）
     # try:
