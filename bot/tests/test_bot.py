@@ -2369,6 +2369,10 @@ class TestOnMessageMore:
                     msg.guild.voice_client.is_connected.return_value = True
                     msg.guild.voice_client.is_playing.return_value = True
                     await on_message(msg)
+                    # キュー上限ドロップではなくレートリミット単体を検証するため、
+                    # 各メッセージ処理後にキューを空にしておく。
+                    if guild_id in queues:
+                        queues[guild_id].clear()
             # 初期 CAPACITY 件のみ合成されその後は拒否
             assert synth_calls == USER_RATE_LIMIT_CAPACITY
         finally:
@@ -2405,6 +2409,10 @@ class TestOnMessageMore:
                     msg.guild.voice_client.is_connected.return_value = True
                     msg.guild.voice_client.is_playing.return_value = True
                     await on_message(msg)
+                    # キュー上限ドロップではなくレートリミット単体を検証するため、
+                    # 各メッセージ処理後にキューを空にしておく。
+                    if guild_id in queues:
+                        queues[guild_id].clear()
                 # ユーザ 2 は独立なので通る
                 msg_b = _make_message(
                     guild_id=guild_id, channel_id=888, user_id=2, content="b"

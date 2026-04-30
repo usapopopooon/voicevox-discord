@@ -201,9 +201,9 @@ client = TtsClient(
 )
 tree = app_commands.CommandTree(client)
 
-# ギルドあたりの再生キュー最大長。1件あたり最大 ~500KB なので maxlen=64 で ~32MB 上限。
-# スパム時は古い音声から自動ドロップしてメモリ使用量を制限する。
-QUEUE_MAXLEN = 64
+# ギルドあたりの再生キュー最大長。スパム時は新規メッセージ側を drop して、
+# 「読み上げが何分も遅れて続く」体感遅延を抑える（小さい値ほど追従性が良い）。
+QUEUE_MAXLEN = 4
 
 # ギルドごとの再生キューと読み上げ対象チャンネル
 queues: dict[int, deque[bytes]] = {}
