@@ -660,13 +660,17 @@ def _replace_western_emoticon(text: str) -> str:
 
 # 日本語圏のネットスラング（笑い表現）。
 # 「草」は文字としての意味（くさ）も多いため変換対象にせず、TTS の自然読み「くさ」に
-# 任せる。曖昧性のない www / ｗｗ のみ「わらい」に置換する。
-_JP_NET_SLANG_PATTERN = re.compile(r"(?<![A-Za-z0-9.])[wｗ]{2,}(?![A-Za-z0-9.])")
+# 任せる。曖昧性のない 2 文字以上の連続だけを置換する。半角/全角・大小文字すべて。
+_JP_NET_SLANG_PATTERN = re.compile(r"(?<![A-Za-z0-9.])[wWｗＷ]{2,}(?![A-Za-z0-9.])")
 
 
 def _replace_jp_net_slang(text: str) -> str:
-    """日本語ネットスラング（www / ｗｗ）を読み仮名に置換する。"""
-    return _JP_NET_SLANG_PATTERN.sub("わらい", text)
+    """日本語ネットスラング（www / ｗｗ / WWW / Ｗｗ など）を読み仮名に置換する。
+
+    `w` 1 文字を `わら` に対応させ、`www` → `わらわらわら` のように回数を
+    保存して読み上げる。
+    """
+    return _JP_NET_SLANG_PATTERN.sub(lambda m: "わら" * len(m.group(0)), text)
 
 
 # 高頻度 Unicode 絵文字の読み替え。必要最小限に絞ってコストを抑える。

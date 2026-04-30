@@ -810,8 +810,14 @@ class TestCleanText:
     def test_replaces_jp_net_slang_w(self):
         from bot import clean_text
 
-        assert clean_text("それなwww") == "それなわらい"
-        assert clean_text("それなｗｗ") == "それなわらい"
+        # 連続文字数を保ってそれぞれ "わら" に展開する
+        assert clean_text("それなwww") == "それなわらわらわら"
+        assert clean_text("それなｗｗ") == "それなわらわら"
+        # 大文字・全角大文字も同様
+        assert clean_text("それなWW") == "それなわらわら"
+        assert clean_text("それなＷＷＷ") == "それなわらわらわら"
+        # 半角/全角・大小文字混在もまとめて変換
+        assert clean_text("ｗWｗW") == "わらわらわらわら"
 
     def test_does_not_convert_kusa_to_warai(self):
         """「草」は本来の意味（くさ）でも使われるため変換せず TTS に委ねる"""
