@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import io
 import logging
 import os
@@ -10,9 +11,10 @@ import time
 import unicodedata
 import wave
 from collections import OrderedDict, deque
-from collections.abc import Mapping
+from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
+from types import FrameType, MappingProxyType
+from typing import Any, cast
 
 import aiohttp
 import asyncpg
@@ -47,7 +49,7 @@ _LOG_FORMAT = (
 )
 logging.basicConfig(level=_LOG_LEVEL, format=_LOG_FORMAT)
 logger = logging.getLogger(__name__)
-if _LOG_LEVEL_NAME not in logging._nameToLevel:
+if _LOG_LEVEL_NAME not in logging.getLevelNamesMapping():
     logger.warning(f"LOG_LEVEL='{_LOG_LEVEL_NAME}' は未知のため INFO にフォールバック")
 
 # 設定（環境変数で切り替え）
@@ -224,7 +226,7 @@ VC_RECONNECT_BACKOFF_MAX_SECONDS = 60
 _background_tasks: set[asyncio.Task] = set()
 
 
-def _spawn_background(coro) -> asyncio.Task:
+def _spawn_background(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
     """create_task しつつ参照を保持し、完了時に自動回収する。"""
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
@@ -304,12 +306,28 @@ def _is_vc_playing(vc: discord.VoiceClient) -> bool:
         return False
 
 
-async def _safe_disconnect(vc: discord.VoiceClient) -> None:
+async def _safe_disconnect(vc: discord.VoiceClient | None) -> None:
     """VC切断。既に切断済みなどで例外が出ても無視する。"""
+    if vc is None:
+        return
     try:
-        await vc.disconnect()
+        await vc.disconnect(force=False)
     except Exception as e:
         logger.warning(f"切断でエラー: {e}")
+
+
+def _as_voice_client(
+    vc: discord.VoiceProtocol | None,
+) -> discord.VoiceClient | None:
+    """`guild.voice_client` (VoiceProtocol) を本Botの実体である VoiceClient として扱う。
+
+    本Bot は `channel.connect()` でしか VC を張らないため、実行時は常に
+    VoiceClient (または None) になる。型システム上は VoiceProtocol が返る
+    ため、ここで一括キャストしてヘルパーに渡せるようにする。
+    """
+    if vc is None:
+        return None
+    return cast(discord.VoiceClient, vc)
 
 
 def _has_active_voice_connection(guild: discord.Guild) -> bool:
@@ -318,7 +336,7 @@ def _has_active_voice_connection(guild: discord.Guild) -> bool:
     `guild.voice_client` は切断後も残骸として None でない場合があるため、
     オブジェクトの有無だけでなく `is_connected()` まで確認する。
     """
-    vc = guild.voice_client
+    vc = _as_voice_client(guild.voice_client)
     return vc is not None and _is_vc_connected(vc)
 
 
@@ -329,7 +347,7 @@ async def _reset_voice_state(guild: discord.Guild) -> None:
     （= 切断済みのはずの状態）で呼び、stale な voice_client 残骸 + 残留キュー
     を一括で初期化するための helper。
     """
-    stale = guild.voice_client
+    stale = _as_voice_client(guild.voice_client)
     if stale is not None:
         logger.info(f"stale voice_client を掃除 guild={guild.id}")
         await _safe_disconnect(stale)
@@ -793,8 +811,10 @@ def _replace_unicode_emoji(text: str) -> str:
     未知の絵文字も `えもじ_<shortcode>` 形式で読み上げ可能にする。
     """
     if emoji_lib is not None:
+        # クロージャ内では Optional の narrowing を維持できないためローカルに固定する。
+        _lib = emoji_lib
 
-        def _replace(chars: str, data: dict) -> str:
+        def _replace(chars: str, data: dict[str, Any]) -> str:
             reading = _UNICODE_EMOJI_READING.get(chars)
             if reading is not None:
                 return reading
@@ -802,7 +822,7 @@ def _replace_unicode_emoji(text: str) -> str:
             reading = _UNICODE_EMOJI_READING.get(normalized_chars)
             if reading is not None:
                 return reading
-            shortcode = emoji_lib.demojize(normalized_chars, delimiters=("", ""))
+            shortcode = _lib.demojize(normalized_chars, delimiters=("", ""))
             shortcode = shortcode.replace(":", "")
             guessed = _shortcode_to_reading(shortcode)
             if guessed is not None:
@@ -811,7 +831,7 @@ def _replace_unicode_emoji(text: str) -> str:
                 return chars
             return "えもじ_" + shortcode
 
-        return emoji_lib.replace_emoji(text, _replace)
+        return _lib.replace_emoji(text, _replace)
 
     if _UNICODE_EMOJI_PATTERN is None:
         return text
@@ -1096,6 +1116,7 @@ async def init_db():
                 else:
                     raise
 
+        assert db_pool is not None
         async with db_pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS user_settings (
@@ -1568,8 +1589,10 @@ async def _reconnect_vc(
             return
 
         # 接続/発言権限が剥奪されていれば即諦める（無駄なリトライ防止）
+        # 型上は Member (非 Optional) だが、メンバーキャッシュ未読込時に None
+        # が返ることがあるため runtime guard は残す。
         me = guild.me
-        if me is not None:
+        if me is not None:  # pyright: ignore[reportUnnecessaryComparison]
             perms = channel.permissions_for(me)
             if not perms.connect or not perms.speak:
                 logger.warning(
@@ -1593,7 +1616,7 @@ async def _reconnect_vc(
             read_channels[guild_id] = text_channel_id
 
         for attempt in range(VC_RECONNECT_MAX_ATTEMPTS):
-            existing = guild.voice_client
+            existing = _as_voice_client(guild.voice_client)
             if existing and _is_vc_connected(existing):
                 # discord.py の voice resume 等で voice_client が既に張られて
                 # いるケース。connect は不要だがメモリ状態は新規プロセスで
@@ -1740,7 +1763,9 @@ def _make_audio_source(audio_data: bytes) -> discord.AudioSource:
         io.BytesIO(audio_data),
         pipe=True,
         before_options="-loglevel error",
-        stderr=subprocess.DEVNULL,
+        # discord.py の型注釈は IO[bytes] のみだが、subprocess.Popen に丸投げしており
+        # subprocess.DEVNULL (= -3) も実行時には正しく解釈される。
+        stderr=subprocess.DEVNULL,  # pyright: ignore[reportArgumentType]
     )
 
 
@@ -2116,14 +2141,14 @@ async def play_next(guild_id: int, vc: discord.VoiceClient):
         audio_data = queue.popleft()
         source = _make_audio_source(audio_data)
 
-        def after_play(error):
+        def after_play(error: Exception | None) -> None:
             if error:
                 logger.error(f"再生エラー: {error}")
             future = asyncio.run_coroutine_threadsafe(
                 play_next(guild_id, vc), client.loop
             )
 
-            def _log_future_exception(fut):
+            def _log_future_exception(fut: concurrent.futures.Future[None]) -> None:
                 try:
                     fut.result()
                 except Exception as exc:
@@ -2246,7 +2271,9 @@ async def on_ready():
     #
     # - スラッシュコマンド同期（Discord API 呼び出し）
     # await tree.sync()
-    logger.info(f"Botログイン: {client.user} (ID: {client.user.id})")
+    user = client.user
+    if user is not None:
+        logger.info(f"Botログイン: {user} (ID: {user.id})")
     logger.info("起動高速化モード: 一部の初期化処理をスキップしています")
 
     try:
@@ -2299,14 +2326,26 @@ async def join(interaction: discord.Interaction):
     if guild is None:
         return
 
-    if not interaction.user.voice:
+    # スラッシュコマンドはギルド内なら interaction.user は Member だが、
+    # 型レベルでは User | Member なので narrow する。
+    invoker = cast(discord.Member, interaction.user)
+    if invoker.voice is None or invoker.voice.channel is None:
         await interaction.response.send_message("先にボイスチャンネルに入ってください")
         return
 
-    channel = interaction.user.voice.channel
+    channel = invoker.voice.channel
 
+    text_channel_id = interaction.channel_id
+    if text_channel_id is None:
+        await interaction.response.send_message(
+            "テキストチャンネル情報を取得できませんでした"
+        )
+        return
+
+    # 型上は Member (非 Optional) だが、メンバーキャッシュ未読込時に None が
+    # 返ることがあるため runtime guard は残す。
     me = guild.me
-    if me is None and client.user is not None:
+    if me is None and client.user is not None:  # pyright: ignore[reportUnnecessaryComparison]
         me = guild.get_member(client.user.id)
     if me is None:
         await interaction.response.send_message(
@@ -2330,7 +2369,9 @@ async def join(interaction: discord.Interaction):
     existing_active = _has_active_voice_connection(guild)
     try:
         if existing_active:
-            await guild.voice_client.move_to(channel)
+            existing_vc = _as_voice_client(guild.voice_client)
+            if existing_vc is not None:
+                await existing_vc.move_to(channel)
         else:
             # stale な voice_client が残っていれば掃除してから新規接続
             await _reset_voice_state(guild)
@@ -2345,11 +2386,11 @@ async def join(interaction: discord.Interaction):
     else:
         # 新規接続: 切断クリーンアップ漏れ等で残存する古いキューを破棄
         queues[guild.id] = _new_queue()
-    read_channels[guild.id] = interaction.channel_id
+    read_channels[guild.id] = text_channel_id
 
     # 再起動・切断時に元の VC へ復旧できるようセッションを永続化
     try:
-        await record_voice_session(guild.id, channel.id, interaction.channel_id)
+        await record_voice_session(guild.id, channel.id, text_channel_id)
     except Exception as e:
         logger.warning(f"VCセッション保存に失敗: {e}")
 
@@ -2378,10 +2419,10 @@ async def join(interaction: discord.Interaction):
         # async with _synth_order_lock(guild.id):
         settings = get_user_settings(guild.id, interaction.user.id)
         audio_data = await synthesize("せつぞくしました", settings, cache=True)
-        vc = guild.voice_client
+        vc = _as_voice_client(guild.voice_client)
         if vc and _is_vc_connected(vc):
             queues[guild.id].append(audio_data)
-        vc = guild.voice_client
+        vc = _as_voice_client(guild.voice_client)
         if vc and _is_vc_connected(vc) and _can_start_playback(vc):
             await play_next(guild.id, vc)
     except Exception as e:
@@ -2415,7 +2456,7 @@ async def on_voice_state_update(
             _spawn_background(_safe_forget_voice_session(guild_id))
         else:
             # Bot 自身の再接続 → 残キューがあれば再生再開
-            vc = member.guild.voice_client
+            vc = _as_voice_client(member.guild.voice_client)
             queue = queues.get(guild_id)
             if vc and queue and _can_start_playback(vc):
                 await play_next(guild_id, vc)
@@ -2425,11 +2466,7 @@ async def on_voice_state_update(
             # `read_channels` が無い場合 (/leave 後等) は再記録しない。
             # stale voice_client を弾くため `_is_vc_connected` で実接続を確認。
             text_channel_id = read_channels.get(guild_id)
-            if (
-                _is_vc_connected(vc)
-                and text_channel_id is not None
-                and after.channel is not None
-            ):
+            if vc and _is_vc_connected(vc) and text_channel_id is not None:
                 _spawn_background(
                     _safe_record_voice_session(
                         guild_id, after.channel.id, text_channel_id
@@ -2437,8 +2474,8 @@ async def on_voice_state_update(
                 )
         return
 
-    vc = member.guild.voice_client
-    if not vc or not vc.is_connected():
+    vc = _as_voice_client(member.guild.voice_client)
+    if vc is None or not vc.is_connected():
         return
 
     guild_id = member.guild.id
@@ -2469,8 +2506,8 @@ async def on_voice_state_update(
             text = f"{name}さんがたいしつしました"
         try:
             # 合成中にBotが切断されることがあるため、再度VC状態を確認する
-            vc = member.guild.voice_client
-            if not vc or not vc.is_connected():
+            vc = _as_voice_client(member.guild.voice_client)
+            if vc is None or not vc.is_connected():
                 return
 
             # ※ パフォーマンス調査のため _synth_order_lock を一旦無効化
@@ -2478,8 +2515,8 @@ async def on_voice_state_update(
             settings = get_user_settings(member.guild.id, member.id)
             audio_data = await synthesize(text, settings, cache=True)
 
-            vc = member.guild.voice_client
-            if not vc or not vc.is_connected():
+            vc = _as_voice_client(member.guild.voice_client)
+            if vc is None or not vc.is_connected():
                 return
 
             _ensure_queue(guild_id).append(audio_data)
@@ -2505,7 +2542,7 @@ async def leave(interaction: discord.Interaction):
             await forget_voice_session(guild.id)
         except Exception as e:
             logger.warning(f"VCセッション削除に失敗: {e}")
-        await _safe_disconnect(guild.voice_client)
+        await _safe_disconnect(_as_voice_client(guild.voice_client))
         _cleanup_guild_state(guild.id)
         await interaction.response.send_message("切断しました")
     else:
@@ -2526,13 +2563,15 @@ async def vc_toggle(interaction: discord.Interaction):
             await forget_voice_session(guild.id)
         except Exception as e:
             logger.warning(f"VCセッション削除に失敗: {e}")
-        await _safe_disconnect(guild.voice_client)
+        await _safe_disconnect(_as_voice_client(guild.voice_client))
         _cleanup_guild_state(guild.id)
         await interaction.response.send_message("切断しました")
     else:
         # 何らかの原因で既に切断されている場合の残骸を掃除してから接続
         await _reset_voice_state(guild)
-        await join.callback(interaction)
+        # discord.py の Command.callback は型上 self を要求するように見えるが
+        # 実体は通常の coroutine 関数として束縛されている。
+        await join.callback(interaction)  # pyright: ignore[reportCallIssue]
 
 
 @tree.command(name="skip", description="現在読み上げ中の音声をスキップ")
@@ -2541,8 +2580,8 @@ async def skip(interaction: discord.Interaction):
     if guild is None:
         return
 
-    vc = guild.voice_client
-    if not vc or not _is_vc_playing(vc):
+    vc = _as_voice_client(guild.voice_client)
+    if vc is None or not _is_vc_playing(vc):
         await interaction.response.send_message("再生中の音声はありません")
         return
     try:
@@ -2699,7 +2738,8 @@ async def speaker_style_autocomplete(
     data = interaction.data if isinstance(interaction.data, dict) else {}
     for opt in data.get("options", []):
         if opt["name"] == "character":
-            char_input = opt.get("value", "")
+            value = opt.get("value", "")
+            char_input = value if isinstance(value, str) else str(value)
             break
 
     if not char_input or not characters:
@@ -2812,8 +2852,8 @@ async def on_message(message: discord.Message):
     if not message.guild:
         return
 
-    vc = message.guild.voice_client
-    if not vc or not vc.is_connected():
+    vc = _as_voice_client(message.guild.voice_client)
+    if vc is None or not vc.is_connected():
         return
 
     # /join を実行したチャンネルのみ読み上げ
@@ -2976,7 +3016,7 @@ def _run_multi_bots(discord_tokens: list[str]) -> None:
     shutdown_requested = False
     logger.info(f"複数Botモードで起動: {len(discord_tokens)}プロセス")
 
-    def _shutdown(_signum, _frame):
+    def _shutdown(_signum: int, _frame: FrameType | None) -> None:
         # docker stop / Railway shutdown の SIGTERM を KeyboardInterrupt 経路に集約
         nonlocal shutdown_requested
         shutdown_requested = True

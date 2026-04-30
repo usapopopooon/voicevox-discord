@@ -10,6 +10,30 @@ line-length = 88
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "UP"]
 
+[tool.pyright]
+include = ["bot"]
+exclude = [
+    "bot/tests",
+    "bot/migrations",
+    "bot/__pycache__",
+    "**/__pycache__",
+]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+# 外部ライブラリ (asyncpg, discord.py 等) の型スタブ不足によるノイズを抑制。
+# 実バグ検出に関わるルール (reportArgumentType, reportOptionalMemberAccess,
+# reportAttributeAccessIssue 等) は strict 既定のまま有効。
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportMissingTypeArgument = false
+# 後方互換のため意図的に残す helper (例: _synth_order_lock) は再利用予定で抑制。
+reportUnusedFunction = false
+# モジュールレベルで rebuild する辞書/正規表現定数は UPPER_CASE のまま再代入する。
+reportConstantRedefinition = false
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["bot/tests"]

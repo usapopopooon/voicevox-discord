@@ -21,6 +21,22 @@ jobs:
       - name: Ruff format check
         run: ruff format --check bot/
 
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        # pyright は discord.py / asyncpg などの型情報を実環境から読むため
+        # ランタイム依存と dev 依存（pyright 含む）の両方を入れる必要がある。
+        run: |
+          pip install -r bot/requirements.txt
+          pip install -r bot/requirements.dev.txt
+      - name: Pyright (strict)
+        run: pyright
+
   test:
     runs-on: ubuntu-latest
     steps:
