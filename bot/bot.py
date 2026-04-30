@@ -673,6 +673,60 @@ def _replace_jp_net_slang(text: str) -> str:
     return _JP_NET_SLANG_PATTERN.sub(lambda m: "わら" * len(m.group(0)), text)
 
 
+# 固定語のネットスラング辞書。ASCII キーは大文字小文字を区別せず、
+# 単語境界 (`(?<![A-Za-z0-9])`/`(?![A-Za-z0-9])`) で英文中の偶然一致を避ける。
+# 日本語混在キー (今北産業 等) は単語境界不要。
+# キーはすべて小文字で保持し、置換時は match.group(0).lower() で照合する。
+_NET_SLANG_DICT: dict[str, str] = {
+    # 半角ASCII（大小不問）
+    "kwsk": "くわしく",
+    "ggrks": "ぐぐれかす",
+    "wktk": "わくてか",
+    "ktkr": "きたこれ",
+    "gdgd": "ぐだぐだ",
+    "gkbr": "がくがくぶるぶる",
+    "thx": "さんくす",
+    "plz": "ぷりーず",
+    "pls": "ぷりーず",
+    "orz": "がっくり",
+    "otz": "がっくり",
+    # 日本語/混在
+    "今北産業": "いまきたさんぎょう",
+    "うp": "アップ",
+}
+
+_NET_SLANG_ASCII_KEYS = (
+    "kwsk",
+    "ggrks",
+    "wktk",
+    "ktkr",
+    "gdgd",
+    "gkbr",
+    "thx",
+    "plz",
+    "pls",
+    "orz",
+    "otz",
+)
+_NET_SLANG_JA_KEYS = ("今北産業", "うp")
+
+_NET_SLANG_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
+    + "|".join(_NET_SLANG_ASCII_KEYS)
+    + r")(?![A-Za-z0-9])|"
+    + "|".join(re.escape(k) for k in _NET_SLANG_JA_KEYS),
+    re.IGNORECASE,
+)
+
+
+def _replace_net_slang_dict(text: str) -> str:
+    """固定語スラングを読み仮名に置換する（kwsk → くわしく, 今北産業 → ... 等）。"""
+    return _NET_SLANG_PATTERN.sub(
+        lambda m: _NET_SLANG_DICT.get(m.group(0).lower(), m.group(0)),
+        text,
+    )
+
+
 # 高頻度 Unicode 絵文字の読み替え。必要最小限に絞ってコストを抑える。
 _UNICODE_EMOJI_READING: dict[str, str] = {
     "☺️": "にっこり",
@@ -1721,6 +1775,7 @@ def clean_text(text: str) -> str:
         text = _replace_western_emoticon(text)
     if _contains_any_char(text, _JP_NET_SLANG_TRIGGER_CHARS):
         text = _replace_jp_net_slang(text)
+    text = _replace_net_slang_dict(text)
     if _contains_any_char(text, _DECO_SYMBOL_TRIGGER_CHARS):
         text = _replace_deco_symbols(text)
     if _contains_possible_unicode_emoji(text):

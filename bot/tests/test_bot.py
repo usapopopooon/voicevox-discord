@@ -819,6 +819,29 @@ class TestCleanText:
         # 半角/全角・大小文字混在もまとめて変換
         assert clean_text("ｗWｗW") == "わらわらわらわら"
 
+    def test_replaces_net_slang_dict(self):
+        """固定語ネットスラング辞書（kwsk, 今北産業 等）の置換"""
+        from bot import clean_text
+
+        # ASCII スラング（大小文字どちらでも置換）
+        assert clean_text("詳細kwsk") == "詳細くわしく"
+        assert clean_text("KWSK") == "くわしく"
+        assert clean_text("ggrks な") == "ぐぐれかす な"
+        assert clean_text("wktk") == "わくてか"
+        assert clean_text("ktkr!") == "きたこれ!"
+        assert clean_text("gdgd だな") == "ぐだぐだ だな"
+        assert clean_text("gkbr") == "がくがくぶるぶる"
+        assert clean_text("thx") == "さんくす"
+        assert clean_text("plz") == "ぷりーず"
+        assert clean_text("orz") == "がっくり"
+        assert clean_text("OTZ") == "がっくり"
+        # 日本語スラング
+        assert clean_text("今北産業") == "いまきたさんぎょう"
+        assert clean_text("うpした") == "アップした"
+        # 英文中の偶然一致は単語境界で防ぐ
+        assert clean_text("akwsk") == "akwsk"
+        assert clean_text("orzanize") == "orzanize"
+
     def test_does_not_convert_kusa_to_warai(self):
         """「草」は本来の意味（くさ）でも使われるため変換せず TTS に委ねる"""
         from bot import clean_text
