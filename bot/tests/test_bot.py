@@ -842,6 +842,21 @@ class TestCleanText:
         assert clean_text("akwsk") == "akwsk"
         assert clean_text("orzanize") == "orzanize"
 
+    def test_replaces_title_readings(self):
+        """ゲーム/アニメ英語タイトルの読み補正"""
+        from bot import clean_text
+
+        # 大小文字どちらでも置換
+        assert clean_text("FATE") == "フェイト"
+        assert clean_text("Fate") == "フェイト"
+        assert clean_text("FGO はじめた") == "フェイトグランドオーダー はじめた"
+        assert clean_text("Pokemon GO") == "ポケモン GO"
+        assert clean_text("HxH 面白い") == "ハンターハンター 面白い"
+        assert clean_text("hxh") == "ハンターハンター"
+        # 単語境界 (英数のみが境界の対象) で英単語中の偶然一致は除外
+        assert clean_text("FATEFUL") == "FATEFUL"
+        assert clean_text("uponfate") == "uponfate"
+
     def test_does_not_convert_kusa_to_warai(self):
         """「草」は本来の意味（くさ）でも使われるため変換せず TTS に委ねる"""
         from bot import clean_text

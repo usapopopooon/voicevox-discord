@@ -727,6 +727,40 @@ def _replace_net_slang_dict(text: str) -> str:
     )
 
 
+# ゲーム/アニメ等、TTS が誤読しがちな英語タイトル/略称の読み辞書。
+# `_NET_SLANG_DICT` と同じく単語境界 (`(?<![A-Za-z0-9])`/`(?![A-Za-z0-9])`) で
+# 英文中の偶然一致を防ぎ、大小文字どちらでもマッチする。値はカタカナ。
+# キーはすべて小文字で保持し、置換時は match.group(0).lower() で照合する。
+_TITLE_READING_DICT: dict[str, str] = {
+    "fate": "フェイト",
+    "fgo": "フェイトグランドオーダー",
+    "bleach": "ブリーチ",
+    "naruto": "ナルト",
+    "pokemon": "ポケモン",
+    "dbz": "ドラゴンボールゼット",
+    "sao": "ソードアートオンライン",
+    "hxh": "ハンターハンター",
+    "fps": "エフピーエス",
+    "rpg": "アールピージー",
+    "mmo": "エムエムオー",
+    "trpg": "ティーアールピージー",
+    "moba": "モバ",
+}
+
+_TITLE_READING_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:" + "|".join(_TITLE_READING_DICT) + r")(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _replace_title_readings(text: str) -> str:
+    """ゲーム/アニメ等の英語タイトル/略称を読み仮名に置換する。"""
+    return _TITLE_READING_PATTERN.sub(
+        lambda m: _TITLE_READING_DICT.get(m.group(0).lower(), m.group(0)),
+        text,
+    )
+
+
 # 高頻度 Unicode 絵文字の読み替え。必要最小限に絞ってコストを抑える。
 _UNICODE_EMOJI_READING: dict[str, str] = {
     "☺️": "にっこり",
@@ -1776,6 +1810,7 @@ def clean_text(text: str) -> str:
     if _contains_any_char(text, _JP_NET_SLANG_TRIGGER_CHARS):
         text = _replace_jp_net_slang(text)
     text = _replace_net_slang_dict(text)
+    text = _replace_title_readings(text)
     if _contains_any_char(text, _DECO_SYMBOL_TRIGGER_CHARS):
         text = _replace_deco_symbols(text)
     if _contains_possible_unicode_emoji(text):
