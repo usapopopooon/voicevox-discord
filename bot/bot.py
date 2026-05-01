@@ -1715,10 +1715,16 @@ async def _reconnect_vc(
                 # 空のため、ここでも必ず再反映する（read_channels が None だと
                 # on_message が早期 return してテキストを読まなくなるバグ）。
                 _ensure_session_memory()
+                # resume 経路では deaf 状態が前プロセスから引き継がれない可能性が
+                # あるため、明示的に self_deaf を有効化する。
+                try:
+                    await guild.change_voice_state(channel=channel, self_deaf=True)
+                except Exception as e:
+                    logger.warning(f"self_deaf 設定に失敗 guild={guild_id}: {e}")
                 logger.info(f"VC既に接続中、メモリ状態を再反映 guild={guild_id}")
                 return
             try:
-                await channel.connect()
+                await channel.connect(self_deaf=True)
                 _ensure_session_memory()
                 logger.info(f"VC復旧成功 guild={guild_id} channel={voice_channel_id}")
                 return
@@ -2467,9 +2473,11 @@ async def join(interaction: discord.Interaction):
             if existing_vc is not None:
                 await existing_vc.move_to(channel)
         else:
-            # stale な voice_client が残っていれば掃除してから新規接続
+            # stale な voice_client が残っていれば掃除してから新規接続。
+            # self_deaf=True で受信を切り、他人の音声パケット処理コスト (CPU/帯域)
+            # を Discord 側で抑制する。送信は維持するため self_mute は付けない。
             await _reset_voice_state(guild)
-            await channel.connect()
+            await channel.connect(self_deaf=True)
     except Exception as e:
         await interaction.response.send_message(f"VCへの接続に失敗しました: {e}")
         return
