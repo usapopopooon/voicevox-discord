@@ -2368,13 +2368,14 @@ async def on_ready():
     #     await purge_builtin_duplicates_from_user_dicts()
     # except Exception as e:
     #     logger.warning(f"ビルドイン重複ユーザー辞書の掃除でエラー: {e}")
-    #
-    # - スラッシュコマンド同期（Discord API 呼び出し）
-    # await tree.sync()
+    try:
+        await tree.sync()
+        logger.info("スラッシュコマンドを同期しました")
+    except Exception as e:
+        logger.warning(f"スラッシュコマンドの同期に失敗: {e}")
     user = client.user
     if user is not None:
         logger.info(f"Botログイン: {user} (ID: {user.id})")
-    logger.info("起動高速化モード: 一部の初期化処理をスキップしています")
 
     try:
         await client.change_presence(activity=discord.CustomActivity(name="読み上げ中"))
