@@ -2967,6 +2967,10 @@ async def on_message(message: discord.Message):
     if is_muted(message.guild.id, message.author.id):
         return
 
+    # 「;」で始まるメッセージは読み上げ対象外（チャットのみ用途）
+    if message.content.startswith(";"):
+        return
+
     text = clean_text(message.clean_content)
     if not text:
         return

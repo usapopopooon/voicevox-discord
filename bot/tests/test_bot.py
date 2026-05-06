@@ -1015,6 +1015,24 @@ class TestOnMessage:
         read_channels.pop(111, None)
         guild_mutes.pop(111, None)
 
+    async def test_ignores_semicolon_prefix(self):
+        from unittest.mock import patch
+
+        from bot import on_message, read_channels
+
+        message = MagicMock()
+        message.author.bot = False
+        message.guild.id = 111
+        message.guild.voice_client.is_connected.return_value = True
+        message.channel.id = 888
+        message.author.id = 222
+        message.content = ";内緒話"
+        read_channels[111] = 888
+        with patch("bot.synthesize") as mock_synth:
+            await on_message(message)
+            mock_synth.assert_not_called()
+        read_channels.pop(111, None)
+
     def test_text_truncation(self):
         from bot import MAX_READ_LENGTH
 
@@ -2175,6 +2193,7 @@ def _make_message(guild_id=111, channel_id=888, user_id=222, content="テスト"
     msg.guild.voice_client.is_playing.return_value = False
     msg.guild.voice_client.is_paused.return_value = False
     msg.channel.id = channel_id
+    msg.content = content
     msg.clean_content = content
     return msg
 
