@@ -56,7 +56,7 @@ if _LOG_LEVEL_NAME not in logging.getLevelNamesMapping():
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 DISCORD_TOKENS_RAW = os.getenv("DISCORD_TOKENS", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-DEFAULT_SPEAKER = int(os.getenv("DEFAULT_SPEAKER_ID", "3"))
+DEFAULT_SPEAKER = int(os.getenv("DEFAULT_SPEAKER_ID", "46"))
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -1214,7 +1214,7 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS user_settings (
                     guild_id BIGINT NOT NULL DEFAULT 0,
                     user_id BIGINT NOT NULL,
-                    speaker_id INTEGER NOT NULL DEFAULT 3,
+                    speaker_id INTEGER NOT NULL DEFAULT 46,
                     speed REAL NOT NULL DEFAULT 1.0,
                     pitch REAL NOT NULL DEFAULT 0.0,
                     intonation REAL NOT NULL DEFAULT 1.0,
@@ -2042,7 +2042,7 @@ async def _build_synthesis_candidates(
         add(info[0], info[1], "cached_speaker_fallback")
 
     # 5. 最終手段: 各エンジンへ DEFAULT_SPEAKER を直接投げる。
-    # 注意: DEFAULT_SPEAKER は VOICEVOX のデフォルト値（3=ずんだもん）が前提。
+    # 注意: DEFAULT_SPEAKER は VOICEVOX のデフォルト値（46=小夜/SAYO ノーマル）が前提。
     # COEIROINK/SHAREVOX 単体運用の場合は DEFAULT_SPEAKER_ID を適切に設定すること。
     for _, engine_url, _ in ENGINES:
         add(engine_url, DEFAULT_SPEAKER, "raw_default_id")

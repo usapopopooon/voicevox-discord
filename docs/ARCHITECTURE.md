@@ -99,7 +99,7 @@ voicevox-discord/
 CREATE TABLE user_settings (
     guild_id BIGINT NOT NULL DEFAULT 0,
     user_id BIGINT NOT NULL,
-    speaker_id INTEGER NOT NULL DEFAULT 3,
+    speaker_id INTEGER NOT NULL DEFAULT 46,
     speed REAL NOT NULL DEFAULT 1.0,
     pitch REAL NOT NULL DEFAULT 0.0,
     intonation REAL NOT NULL DEFAULT 1.0,
@@ -249,7 +249,7 @@ Discord互換WAVなら PCMAudio で直接再生
 | `VOICEVOX_URL` | VOICEVOX Engine の URL | `http://localhost:50021` |
 | `COEIROINK_URL` | COEIROINK Engine の URL（省略可） | - |
 | `SHAREVOX_URL` | SHAREVOX Engine の URL（省略可） | - |
-| `DEFAULT_SPEAKER_ID` | デフォルト Speaker ID | `3` |
+| `DEFAULT_SPEAKER_ID` | デフォルト Speaker ID（46=小夜/SAYO ノーマル） | `46` |
 | `DATABASE_URL` | PostgreSQL 接続 URL | - |
 | `LOG_LEVEL` | ログレベル | `INFO` |
 | `DB_POOL_MIN_SIZE` / `DB_POOL_MAX_SIZE` | asyncpg コネクションプールサイズ（複数Bot時は max を絞ること） | `1` / `5` |

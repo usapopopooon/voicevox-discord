@@ -1381,8 +1381,8 @@ class TestSynthesizeFallback:
         import bot
         from bot import VoiceSettings, synthesize
 
-        # DEFAULT_SPEAKER=3 のマッピングは登録済み、指定 speaker_id は未登録のケース
-        bot.speaker_engine[3] = ("http://test-voicevox:50021", 3)
+        # DEFAULT_SPEAKER=46 のマッピングは登録済み、指定 speaker_id は未登録のケース
+        bot.speaker_engine[46] = ("http://test-voicevox:50021", 46)
         try:
             with aioresponses() as m:
                 m.post(re.compile(r".*audio_query.*"), payload={})
@@ -1390,9 +1390,9 @@ class TestSynthesizeFallback:
                 result = await synthesize("テスト", VoiceSettings(speaker_id=99999))
                 assert result == b"fallback-data"
                 audio_query_call = list(m.requests.values())[0][0]
-                assert audio_query_call.kwargs["params"]["speaker"] == 3
+                assert audio_query_call.kwargs["params"]["speaker"] == 46
         finally:
-            bot.speaker_engine.pop(3, None)
+            bot.speaker_engine.pop(46, None)
 
     async def test_raises_when_speaker_engine_empty(self):
         """全候補が失敗した場合は ClientError 系を返す。"""
@@ -1512,7 +1512,7 @@ class TestSynthesizeFallback:
             )
             bot.speaker_engine.clear()
             bot.speaker_engine[999] = ("http://requested:50021", 99)
-            bot.speaker_engine[3] = ("http://default:50021", 3)
+            bot.speaker_engine[46] = ("http://default:50021", 46)
             bot.speaker_engine[10] = ("http://cached-a:50021", 10)
             bot.speaker_engine[11] = ("http://cached-b:50021", 11)
             bot.speaker_engine[12] = ("http://cached-c:50021", 12)
@@ -3805,12 +3805,12 @@ class TestSynthesizeCache:
             bot.speaker_engine.clear()
             bot._candidate_fail_until.clear()
             bot.speaker_engine[777] = ("http://bad-a:50021", 7)
-            bot.speaker_engine[3] = ("http://bad-b:50021", 3)
+            bot.speaker_engine[46] = ("http://bad-b:50021", 46)
             future = bot.time.monotonic() + 60.0
             for engine_url, real_id in {
                 ("http://bad-a:50021", 7),
-                ("http://bad-b:50021", 3),
-                ("http://test-voicevox:50021", 3),
+                ("http://bad-b:50021", 46),
+                ("http://test-voicevox:50021", 46),
             }:
                 bot._candidate_fail_until[(engine_url, real_id)] = future
 
@@ -3842,7 +3842,7 @@ class TestSynthesizeCache:
             ],
         )
         bot.speaker_engine.clear()
-        bot.speaker_engine[3] = ("http://primary:50021", 3)
+        bot.speaker_engine[46] = ("http://primary:50021", 46)
         try:
             with aioresponses() as m:
                 m.post(
@@ -3860,8 +3860,8 @@ class TestSynthesizeCache:
                 result = await synthesize("test", VoiceSettings(), cache=True)
                 assert result == b"fallback-result"
 
-            primary_key = ("http://primary:50021", 3, "test", 1.0, 0.0, 1.0, 1.0)
-            fallback_key = ("http://fallback:50021", 3, "test", 1.0, 0.0, 1.0, 1.0)
+            primary_key = ("http://primary:50021", 46, "test", 1.0, 0.0, 1.0, 1.0)
+            fallback_key = ("http://fallback:50021", 46, "test", 1.0, 0.0, 1.0, 1.0)
             assert primary_key in bot._synth_cache
             assert fallback_key in bot._synth_cache
             assert bot._synth_cache[primary_key] == b"fallback-result"
@@ -3870,7 +3870,7 @@ class TestSynthesizeCache:
             bot._synth_cache.clear()
             bot._synth_in_flight.clear()
             bot.speaker_engine.clear()
-            bot.speaker_engine[3] = ("http://test-voicevox:50021", 3)
+            bot.speaker_engine[46] = ("http://test-voicevox:50021", 46)
 
 
 def _make_wav_bytes(channels=2, rate=48000, width=2, n_samples=480):

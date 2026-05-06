@@ -39,7 +39,7 @@ services:
       VOICEVOX_URL: http://voicevox:50021
       # COEIROINK_URL: http://coeiroink:50031
       # SHAREVOX_URL: http://sharevox:50025
-      DEFAULT_SPEAKER_ID: "3"
+      DEFAULT_SPEAKER_ID: "46"
       DATABASE_URL: postgresql://bot:bot@postgres:5432/voicevox_bot
     depends_on:
       - voicevox
