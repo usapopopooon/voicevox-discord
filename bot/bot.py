@@ -2118,7 +2118,10 @@ async def _try_candidate(
         _candidate_fail_until[pair] = time.monotonic() + CANDIDATE_FAIL_BACKOFF_SECONDS
         raise
 
-    _candidate_fail_until.pop(pair, None)
+    if _candidate_fail_until.pop(pair, None) is not None:
+        logger.info(
+            f"音声合成エンジン復旧: engine={cand.engine_url}, speaker={cand.real_id}"
+        )
     actual_key = _synth_cache_key(cand, text, settings)
     _store_recent_synth_cache(actual_key, data)
     if primary_key is not None and actual_key != primary_key:
