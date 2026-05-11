@@ -5001,23 +5001,70 @@ class TestOnMessageAttachments:
 
 
 class TestHelpCommand:
-    def test_help_embed_contains_voicevox_url(self):
-        from bot import _VOICEVOX_OFFICIAL_URL, _build_help_embed
+    def test_help_embed_has_title(self):
+        from bot import _build_help_embed
 
         embed = _build_help_embed()
-        assert _VOICEVOX_OFFICIAL_URL in (embed.description or "")
-        assert "/help" in (embed.description or "")
+        assert embed.title == "読み上げBot — コマンド一覧"
 
-    def test_help_embed_with_prefix(self):
+    def test_help_embed_contains_voicevox_url_and_label(self):
+        from bot import _VOICEVOX_OFFICIAL_URL, _build_help_embed
+
+        description = _build_help_embed().description or ""
+        assert _VOICEVOX_OFFICIAL_URL in description
+        # 「各ボイスおよびライセンスはこちら」など、URL の文脈も併記されている
+        assert "ライセンス" in description
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "/vc",
+            "/join",
+            "/leave",
+            "/skip",
+            "/speaker",
+            "/voice",
+            "/dict",
+            "/mute",
+            "/unmute",
+            "/showmute",
+            "/help",
+        ],
+    )
+    def test_help_embed_lists_all_commands(self, command):
+        from bot import _build_help_embed
+
+        description = _build_help_embed().description or ""
+        assert command in description
+
+    def test_help_embed_without_prefix_starts_with_command_list(self):
+        from bot import _build_help_embed
+
+        description = _build_help_embed().description or ""
+        # prefix 無し時は冒頭が即コマンド一覧。接続メッセージは混入しない
+        assert description.lstrip().startswith("`/vc`")
+        assert "接続しました" not in description
+
+    def test_help_embed_with_prefix_inserts_prefix_at_top(self):
         from bot import _build_help_embed
 
         embed = _build_help_embed(prefix="「general」に接続しました")
         description = embed.description or ""
         assert description.startswith("「general」に接続しました")
         # prefix の後にコマンド一覧が続く
-        assert "/vc" in description
+        assert "`/vc`" in description
 
-    async def test_help_command_sends_embed(self):
+    async def test_help_command_rejects_when_no_guild(self):
+        """help は guild 外でも動く想定（コマンド一覧は読み上げ依存ではない）"""
+        from bot import help_cmd
+
+        interaction = _make_interaction()
+        interaction.guild = None
+        # _require_guild_interaction を使っていないので例外なく完走する
+        await help_cmd.callback(interaction)
+        interaction.response.send_message.assert_awaited_once()
+
+    async def test_help_command_sends_embed_with_url(self):
         from bot import _VOICEVOX_OFFICIAL_URL, help_cmd
 
         interaction = _make_interaction()
@@ -5027,4 +5074,23 @@ class TestHelpCommand:
         kwargs = interaction.response.send_message.await_args.kwargs
         embed = kwargs.get("embed")
         assert embed is not None
+        assert isinstance(embed, discord.Embed)
         assert _VOICEVOX_OFFICIAL_URL in (embed.description or "")
+
+    async def test_help_command_uses_no_prefix(self):
+        """/help は接続メッセージを含まない（純粋なコマンド一覧）"""
+        from bot import help_cmd
+
+        interaction = _make_interaction()
+        await help_cmd.callback(interaction)
+
+        embed = interaction.response.send_message.await_args.kwargs["embed"]
+        description = embed.description or ""
+        assert "接続しました" not in description
+
+    def test_help_command_metadata(self):
+        """slash コマンドとして name/description が正しく設定されている"""
+        from bot import help_cmd
+
+        assert help_cmd.name == "help"
+        assert help_cmd.description == "コマンド一覧を表示"
