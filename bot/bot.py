@@ -11,7 +11,7 @@ import time
 import unicodedata
 import wave
 from collections import OrderedDict, deque
-from collections.abc import Coroutine, Mapping
+from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import FrameType, MappingProxyType
 from typing import Any, cast
@@ -2427,6 +2427,50 @@ async def on_guild_remove(guild: discord.Guild):
 _VOICEVOX_OFFICIAL_URL = "https://voicevox.hiroshiba.jp/"
 
 
+def _attachment_category(content_type: str | None) -> str:
+    """添付ファイルの content_type からひらがなのカテゴリ名を返す。
+
+    Discord の Attachment.content_type は MIME タイプ。未知や None の場合は
+    汎用的に「ふぁいる」へフォールバックする。
+    """
+    ct = (content_type or "").lower()
+    if ct.startswith("image/"):
+        return "がぞう"
+    if ct.startswith("video/"):
+        return "どうが"
+    if ct.startswith("audio/"):
+        return "おんせい"
+    if ct == "application/pdf":
+        return "ぴーでぃーえふ"
+    if ct.startswith("text/"):
+        return "てきすとふぁいる"
+    if ct in (
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/x-7z-compressed",
+        "application/x-tar",
+        "application/gzip",
+    ):
+        return "あっしゅくふぁいる"
+    return "ふぁいる"
+
+
+def _build_attachment_notice(attachments: Sequence[discord.Attachment]) -> str:
+    """添付ファイル群を「〜がてんぷされました」の読み上げ文に変換する。
+
+    複数カテゴリが混在する場合は「がぞうとどうがが…」のように「と」で連結する。
+    添付なしなら空文字を返す。
+    """
+    seen: list[str] = []
+    for att in attachments:
+        category = _attachment_category(att.content_type)
+        if category not in seen:
+            seen.append(category)
+    if not seen:
+        return ""
+    return "と".join(seen) + "がてんぷされました"
+
+
 def _build_help_embed(prefix: str | None = None) -> discord.Embed:
     """コマンド一覧の Embed を生成する。
 
@@ -3000,7 +3044,8 @@ async def on_message(message: discord.Message):
         return
 
     text = clean_text(message.clean_content)
-    if not text:
+    attachment_notice = _build_attachment_notice(message.attachments)
+    if not text and not attachment_notice:
         return
 
     # 辞書で置換（ユーザ辞書が先、built-in は後でユーザ側が優先）
@@ -3011,6 +3056,10 @@ async def on_message(message: discord.Message):
     # 長すぎるメッセージは切り詰め
     if len(text) > MAX_READ_LENGTH:
         text = text[:MAX_READ_LENGTH] + "、いかりゃく"
+
+    # 添付ファイルがあれば末尾に通知（添付のみの場合は通知だけ読み上げる）
+    if attachment_notice:
+        text = f"{text}、{attachment_notice}" if text else attachment_notice
 
     guild_id = message.guild.id
 

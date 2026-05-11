@@ -4851,3 +4851,180 @@ class TestSafeVoiceSessionWrappers:
 
         monkeypatch.setattr(bot, "record_voice_session", raise_error)
         await bot._safe_record_voice_session(9204, 100, 200)
+
+
+def _make_attachment(content_type: str | None) -> MagicMock:
+    att = MagicMock(spec=discord.Attachment)
+    att.content_type = content_type
+    return att
+
+
+class TestAttachmentCategory:
+    @pytest.mark.parametrize(
+        ("content_type", "expected"),
+        [
+            ("image/png", "がぞう"),
+            ("image/jpeg", "がぞう"),
+            ("IMAGE/GIF", "がぞう"),  # 大文字小文字を吸収
+            ("video/mp4", "どうが"),
+            ("audio/mpeg", "おんせい"),
+            ("application/pdf", "ぴーでぃーえふ"),
+            ("text/plain", "てきすとふぁいる"),
+            ("application/zip", "あっしゅくふぁいる"),
+            ("application/x-7z-compressed", "あっしゅくふぁいる"),
+            ("application/octet-stream", "ふぁいる"),
+            ("", "ふぁいる"),
+            (None, "ふぁいる"),
+        ],
+    )
+    def test_categorizes_content_type(self, content_type, expected):
+        from bot import _attachment_category
+
+        assert _attachment_category(content_type) == expected
+
+
+class TestBuildAttachmentNotice:
+    def test_empty_returns_empty_string(self):
+        from bot import _build_attachment_notice
+
+        assert _build_attachment_notice([]) == ""
+
+    def test_single_image(self):
+        from bot import _build_attachment_notice
+
+        notice = _build_attachment_notice([_make_attachment("image/png")])
+        assert notice == "がぞうがてんぷされました"
+
+    def test_unknown_falls_back_to_file(self):
+        from bot import _build_attachment_notice
+
+        notice = _build_attachment_notice([_make_attachment(None)])
+        assert notice == "ふぁいるがてんぷされました"
+
+    def test_dedupes_same_category(self):
+        from bot import _build_attachment_notice
+
+        notice = _build_attachment_notice(
+            [_make_attachment("image/png"), _make_attachment("image/jpeg")]
+        )
+        assert notice == "がぞうがてんぷされました"
+
+    def test_joins_distinct_categories_with_to(self):
+        from bot import _build_attachment_notice
+
+        notice = _build_attachment_notice(
+            [_make_attachment("image/png"), _make_attachment("video/mp4")]
+        )
+        assert notice == "がぞうとどうががてんぷされました"
+
+    def test_preserves_first_seen_order(self):
+        from bot import _build_attachment_notice
+
+        notice = _build_attachment_notice(
+            [
+                _make_attachment("audio/mpeg"),
+                _make_attachment("image/png"),
+                _make_attachment("audio/wav"),  # 重複扱いで無視
+            ]
+        )
+        assert notice == "おんせいとがぞうがてんぷされました"
+
+
+class TestOnMessageAttachments:
+    async def test_image_only_message_is_announced(self):
+        from bot import on_message, read_channels
+
+        msg = _make_message(guild_id=20001, content="")
+        msg.attachments = [_make_attachment("image/png")]
+        read_channels[20001] = msg.channel.id
+
+        synth_mock = AsyncMock(return_value=b"wav")
+        try:
+            with patch("bot.synthesize", synth_mock), patch("discord.FFmpegPCMAudio"):
+                await on_message(msg)
+        finally:
+            read_channels.pop(20001, None)
+
+        synth_mock.assert_awaited_once()
+        # 第1引数が読み上げ対象テキスト
+        assert synth_mock.await_args.args[0] == "がぞうがてんぷされました"
+
+    async def test_text_with_image_appends_notice(self):
+        from bot import on_message, read_channels
+
+        msg = _make_message(guild_id=20002, content="こんにちは")
+        msg.attachments = [_make_attachment("image/jpeg")]
+        read_channels[20002] = msg.channel.id
+
+        synth_mock = AsyncMock(return_value=b"wav")
+        try:
+            with patch("bot.synthesize", synth_mock), patch("discord.FFmpegPCMAudio"):
+                await on_message(msg)
+        finally:
+            read_channels.pop(20002, None)
+
+        synth_mock.assert_awaited_once()
+        assert synth_mock.await_args.args[0] == "こんにちは、がぞうがてんぷされました"
+
+    async def test_video_only_message_uses_video_category(self):
+        from bot import on_message, read_channels
+
+        msg = _make_message(guild_id=20003, content="")
+        msg.attachments = [_make_attachment("video/mp4")]
+        read_channels[20003] = msg.channel.id
+
+        synth_mock = AsyncMock(return_value=b"wav")
+        try:
+            with patch("bot.synthesize", synth_mock), patch("discord.FFmpegPCMAudio"):
+                await on_message(msg)
+        finally:
+            read_channels.pop(20003, None)
+
+        synth_mock.assert_awaited_once()
+        assert synth_mock.await_args.args[0] == "どうががてんぷされました"
+
+    async def test_no_text_and_no_attachment_skips(self):
+        from bot import on_message, read_channels
+
+        msg = _make_message(guild_id=20004, content="")
+        msg.attachments = []
+        read_channels[20004] = msg.channel.id
+
+        synth_mock = AsyncMock()
+        try:
+            with patch("bot.synthesize", synth_mock):
+                await on_message(msg)
+        finally:
+            read_channels.pop(20004, None)
+
+        synth_mock.assert_not_called()
+
+
+class TestHelpCommand:
+    def test_help_embed_contains_voicevox_url(self):
+        from bot import _VOICEVOX_OFFICIAL_URL, _build_help_embed
+
+        embed = _build_help_embed()
+        assert _VOICEVOX_OFFICIAL_URL in (embed.description or "")
+        assert "/help" in (embed.description or "")
+
+    def test_help_embed_with_prefix(self):
+        from bot import _build_help_embed
+
+        embed = _build_help_embed(prefix="「general」に接続しました")
+        description = embed.description or ""
+        assert description.startswith("「general」に接続しました")
+        # prefix の後にコマンド一覧が続く
+        assert "/vc" in description
+
+    async def test_help_command_sends_embed(self):
+        from bot import _VOICEVOX_OFFICIAL_URL, help_cmd
+
+        interaction = _make_interaction()
+        await help_cmd.callback(interaction)
+
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        embed = kwargs.get("embed")
+        assert embed is not None
+        assert _VOICEVOX_OFFICIAL_URL in (embed.description or "")
