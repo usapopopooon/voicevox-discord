@@ -2424,6 +2424,37 @@ async def on_guild_remove(guild: discord.Guild):
     logger.info(f"ギルド退出によりメモリ状態を解放 (Guild: {guild_id})")
 
 
+_VOICEVOX_OFFICIAL_URL = "https://voicevox.hiroshiba.jp/"
+
+
+def _build_help_embed(prefix: str | None = None) -> discord.Embed:
+    """コマンド一覧の Embed を生成する。
+
+    /join と /help で同じ Embed を共有するためのヘルパー。
+    `prefix` が指定された場合は description の冒頭に挿入する。
+    """
+    body = (
+        "`/vc` — VCに接続/切断（トグル）\n"
+        "`/join` — VCに接続\n"
+        "`/leave` — VCから切断\n"
+        "`/skip` — 読み上げをスキップ\n"
+        "`/speaker` — キャラクター変更\n"
+        "`/voice` — 話速・音高・抑揚・音量\n"
+        "`/dict` — 読み上げ辞書の管理\n"
+        "`/mute` — ユーザーをミュート\n"
+        "`/unmute` — ミュート解除\n"
+        "`/showmute` — ミュート一覧\n"
+        "`/help` — このヘルプを表示\n\n"
+        f"各ボイスおよびライセンスはこちら: {_VOICEVOX_OFFICIAL_URL}"
+    )
+    description = f"{prefix}\n\n{body}" if prefix else body
+    return discord.Embed(
+        title="読み上げBot — コマンド一覧",
+        description=description,
+        color=0x00B0F4,
+    )
+
+
 @tree.command(name="join", description="ボイスチャンネルに接続")
 async def join(interaction: discord.Interaction):
     guild = await _require_guild_interaction(interaction)
@@ -2500,22 +2531,11 @@ async def join(interaction: discord.Interaction):
     except Exception as e:
         logger.warning(f"VCセッション保存に失敗: {e}")
 
-    embed = discord.Embed(
-        title="読み上げBot — コマンド一覧",
-        description=(
-            f"「{channel.name}」に接続しました\nこのチャンネルのメッセージを読み上げます\n\n"
-            "`/vc` — VCに接続/切断（トグル）\n"
-            "`/join` — VCに接続\n"
-            "`/leave` — VCから切断\n"
-            "`/skip` — 読み上げをスキップ\n"
-            "`/speaker` — キャラクター変更\n"
-            "`/voice` — 話速・音高・抑揚・音量\n"
-            "`/dict` — 読み上げ辞書の管理\n"
-            "`/mute` — ユーザーをミュート\n"
-            "`/unmute` — ミュート解除\n"
-            "`/showmute` — ミュート一覧"
+    embed = _build_help_embed(
+        prefix=(
+            f"「{channel.name}」に接続しました\n"
+            "このチャンネルのメッセージを読み上げます"
         ),
-        color=0x00B0F4,
     )
     await interaction.response.send_message(embed=embed)
 
@@ -2948,6 +2968,11 @@ async def dict_cmd(interaction: discord.Interaction):
 
     content, view = build_dict_message(guild.id)
     await interaction.response.send_message(content=content, view=view)
+
+
+@tree.command(name="help", description="コマンド一覧を表示")
+async def help_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=_build_help_embed())
 
 
 @client.event
