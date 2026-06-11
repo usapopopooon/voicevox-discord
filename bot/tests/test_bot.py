@@ -782,16 +782,16 @@ class TestCleanText:
     def test_replaces_unicode_emoji(self):
         from bot import clean_text
 
-        assert clean_text("こんにちは😀") == "こんにちはにこにこ"
+        assert clean_text("こんにちは😀") == "こんにちはにっこり"
         assert clean_text("こんにちは☺️") == "こんにちはにっこり"
         assert clean_text("おめでと🎀✨") == "おめでとりぼんきらきら"
 
     def test_replaces_unicode_emoji_with_skin_tone(self):
         from bot import clean_text
 
-        assert clean_text("こんにちは👍🏻") == "こんにちはぐっど"
+        assert clean_text("こんにちは👍🏻") == "こんにちはぐー"
 
-    def test_preserves_unknown_unicode_emoji(self):
+    def test_drops_unknown_unicode_emoji(self):
         import bot
         from bot import clean_text
 
@@ -799,7 +799,7 @@ class TestCleanText:
         if bot.emoji_lib is None:
             assert result == "こんにちは🫩"
         else:
-            assert result.startswith("こんにちはえもじ_")
+            assert result == "こんにちは"
             assert "🫩" not in result
 
     def test_replaces_western_emoticon(self):
@@ -4578,12 +4578,13 @@ class TestEmoticonReadingsAreNaturalJapanese:
         assert "にがわらい" in out
         assert "くわら" not in out
 
-    def test_rofl_emoji_reads_as_bakushou(self):
+    def test_rofl_emoji_reads_simply(self):
         from bot import clean_text
 
-        # 🤣 も「ばくわら」ではなく「ばくしょう」
+        # 🤣 は説明的にせず短く読む
         out = clean_text("🤣")
-        assert "ばくしょう" in out
+        assert "わらい" in out
+        assert "ばくしょう" not in out
         assert "ばくわら" not in out
 
 

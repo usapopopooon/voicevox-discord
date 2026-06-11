@@ -765,26 +765,26 @@ def _replace_title_readings(text: str) -> str:
 _UNICODE_EMOJI_READING: dict[str, str] = {
     "☺️": "にっこり",
     "☺": "にっこり",
-    "😀": "にこにこ",
+    "😀": "にっこり",
     "😁": "にっこり",
     "😂": "わらい",
-    "🤣": "ばくしょう",
+    "🤣": "わらい",
     "😆": "わらい",
     "😊": "えがお",
-    "😍": "だいすき",
-    "😘": "ちゅ",
-    "🥰": "だいすき",
+    "😍": "はーと",
+    "😘": "はーと",
+    "🥰": "はーと",
     "😉": "ういんく",
     "🤔": "うーん",
-    "😢": "かなしい",
-    "😭": "おおなき",
-    "😡": "おこる",
+    "😢": "なき",
+    "😭": "なき",
+    "😡": "おこ",
     "😱": "びっくり",
     "😴": "ねむい",
     "🥺": "うるうる",
-    "🙏": "おねがい",
+    "🙏": "ぺこり",
     "🙇": "ぺこり",
-    "👍": "ぐっど",
+    "👍": "ぐー",
     "👎": "だめ",
     "👏": "ぱちぱち",
     "🙌": "ばんざい",
@@ -897,11 +897,7 @@ def _shortcode_to_reading(shortcode: str) -> str | None:
 
 
 def _replace_unicode_emoji(text: str) -> str:
-    """Unicode絵文字を読み仮名に置換する。
-
-    既知の絵文字は `_UNICODE_EMOJI_READING` を優先し、
-    未知の絵文字も `えもじ_<shortcode>` 形式で読み上げ可能にする。
-    """
+    """Unicode絵文字を短い読み仮名へ置換する。未知の絵文字は読まない。"""
     if emoji_lib is not None:
         # クロージャ内では Optional の narrowing を維持できないためローカルに固定する。
         _lib = emoji_lib
@@ -919,9 +915,7 @@ def _replace_unicode_emoji(text: str) -> str:
             guessed = _shortcode_to_reading(shortcode)
             if guessed is not None:
                 return guessed
-            if not shortcode:
-                return chars
-            return "えもじ_" + shortcode
+            return ""
 
         return _lib.replace_emoji(text, _replace)
 
