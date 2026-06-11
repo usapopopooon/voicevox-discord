@@ -1954,6 +1954,7 @@ def _synth_cache_key(
         settings.pitch,
         settings.intonation,
         settings.volume,
+        settings.speaker_id,
     )
 
 

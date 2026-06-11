@@ -3543,6 +3543,37 @@ class TestSynthesizeCache:
             await close_http_session()
             bot._synth_cache.clear()
 
+    async def test_recent_cache_key_includes_requested_speaker(self):
+        """同じ文でも要求 speaker が違う場合は短時間キャッシュを共有しない"""
+        import bot
+        from bot import VoiceSettings, close_http_session, synthesize
+
+        original_map = dict(bot.speaker_engine)
+        bot._recent_synth_cache.clear()
+        try:
+            bot.speaker_engine.clear()
+            bot.speaker_engine[46] = ("http://voicevox:50021", 46)
+            bot.speaker_engine[999] = ("http://voicevox:50021", 999)
+            with aioresponses() as m:
+                m.post(re.compile(r"http://voicevox:50021/audio_query.*"), payload={})
+                m.post(re.compile(r"http://voicevox:50021/synthesis.*"), body=b"zunda")
+                m.post(re.compile(r"http://voicevox:50021/audio_query.*"), payload={})
+                m.post(re.compile(r"http://voicevox:50021/synthesis.*"), body=b"yui")
+                r1 = await synthesize("おー", VoiceSettings(speaker_id=46))
+                r2 = await synthesize("おー", VoiceSettings(speaker_id=999))
+                assert r1 == b"zunda"
+                assert r2 == b"yui"
+
+                synthesis_count = sum(
+                    len(v) for k, v in m.requests.items() if "synthesis" in str(k)
+                )
+                assert synthesis_count == 2
+        finally:
+            bot.speaker_engine.clear()
+            bot.speaker_engine.update(original_map)
+            await close_http_session()
+            bot._recent_synth_cache.clear()
+
     async def test_cache_key_includes_text(self):
         import bot
         from bot import VoiceSettings, close_http_session, synthesize
@@ -3770,6 +3801,7 @@ class TestSynthesizeCache:
                 0.0,
                 1.0,
                 1.0,
+                999,
             )
             bot._synth_cache[fallback_key] = b"from-fallback-cache"
 
@@ -3879,8 +3911,26 @@ class TestSynthesizeCache:
                 result = await synthesize("test", VoiceSettings(), cache=True)
                 assert result == b"fallback-result"
 
-            primary_key = ("http://primary:50021", 46, "test", 1.0, 0.0, 1.0, 1.0)
-            fallback_key = ("http://fallback:50021", 46, "test", 1.0, 0.0, 1.0, 1.0)
+            primary_key = (
+                "http://primary:50021",
+                46,
+                "test",
+                1.0,
+                0.0,
+                1.0,
+                1.0,
+                46,
+            )
+            fallback_key = (
+                "http://fallback:50021",
+                46,
+                "test",
+                1.0,
+                0.0,
+                1.0,
+                1.0,
+                46,
+            )
             assert primary_key in bot._synth_cache
             assert fallback_key in bot._synth_cache
             assert bot._synth_cache[primary_key] == b"fallback-result"
