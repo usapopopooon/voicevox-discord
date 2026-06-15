@@ -2,6 +2,9 @@ services:
   voicevox:
     image: voicevox/voicevox_engine:cpu-latest
     mem_limit: 2g
+    environment:
+      VV_CPU_NUM_THREADS: "4"
+      VV_OUTPUT_LOG_UTF8: "1"
     deploy:
       resources:
         limits:
