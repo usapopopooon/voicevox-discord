@@ -246,7 +246,7 @@ Discord互換WAVなら PCMAudio で直接再生
 | `DISCORD_TOKEN` | 単一Bot起動時の Discord Bot トークン | - |
 | `DISCORD_TOKENS` | 複数Bot起動時の Discord Bot トークン群（カンマ/改行区切り） | - |
 | `VOICEVOX_URL` | VOICEVOX Engine の URL | `http://localhost:50021` |
-| `COEIROINK_URL` | COEIROINK Engine の URL（省略可） | - |
+| `COEIROINK_URL` | COEIROINK Engine の URL（Docker Compose では `http://coeiroink:50031`） | - |
 | `SHAREVOX_URL` | SHAREVOX Engine の URL（省略可） | - |
 | `DEFAULT_SPEAKER_ID` | デフォルト Speaker ID（46=小夜/SAYO ノーマル） | `46` |
 | `DATABASE_URL` | PostgreSQL 接続 URL | - |
@@ -284,7 +284,7 @@ docker compose up
 |---|---|
 | `DISCORD_TOKEN` または `DISCORD_TOKENS` | Discord Developer Portal から取得（複数運用は `DISCORD_TOKENS`） |
 | `VOICEVOX_URL` | `http://voicevox:50021` |
-| `COEIROINK_URL` | COEIROINK v1 を使う場合のみ `http://coeiroink:50031` |
+| `COEIROINK_URL` | `http://coeiroink:50031` |
 | `DATABASE_URL` | `postgresql://bot:bot@postgres:5432/voicevox_bot` |
 
 ### COEIROINK v1 の有効化

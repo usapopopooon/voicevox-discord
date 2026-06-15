@@ -56,7 +56,7 @@ services:
       - .env
     environment:
       VOICEVOX_URL: ${VOICEVOX_URL:-http://voicevox:50021}
-      COEIROINK_URL: ${COEIROINK_URL:-}
+      COEIROINK_URL: ${COEIROINK_URL:-http://coeiroink:50031}
       SHAREVOX_URL: ${SHAREVOX_URL:-}
       DEFAULT_SPEAKER_ID: "46"
       DATABASE_URL: postgresql://bot:bot@postgres:5432/voicevox_bot
