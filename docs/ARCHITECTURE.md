@@ -276,7 +276,7 @@ docker compose up
 |---|---|
 | **Bot** | `docker-compose.yml` の `discord-bot` サービス。`bot/Dockerfile` でビルド |
 | **PostgreSQL** | `postgres` サービス。`pgdata` ボリュームで永続化 |
-| **VOICEVOX** | `voicevox` サービス。`voicevox/voicevox_engine:cpu-latest` を利用 |
+| **VOICEVOX** | `voicevox` サービス。`voicevox/voicevox_engine:cpu-latest` を利用。ユーザーデータは `voicevox_user_data` volume で永続化 |
 | **COEIROINK v1** | 任意。`COMPOSE_PROFILES=coeiroink` で有効化し、`engines/coeiroink/Dockerfile` でビルド |
 | **SHAREVOX** | 任意。`COMPOSE_PROFILES=sharevox` で有効化し、`engines/sharevox/Dockerfile` でビルド |
 
@@ -293,30 +293,32 @@ docker compose up
 ### COEIROINK v1 の有効化
 
 Coolify の環境変数に `COMPOSE_PROFILES=coeiroink` と `COEIROINK_URL=http://coeiroink:50031` を設定する。
-`coeiroink` サービスはデフォルトで公式COEIROINKキャラクターを全件同梱する。
-モデルzipを多数ダウンロードし、Python/Torch系依存も重いため、初回ビルドには時間とディスク容量が必要。
+`coeiroink` サービスはデフォルトで公式COEIROINKキャラクターを全件取得し、`coeiroink_speaker_info` volume に保存する。OpenJTalk 辞書は `coeiroink_openjtalk_dic` volume に保存する。
+モデルzipを多数ダウンロードするため初回起動には時間とディスク容量が必要だが、volume が残っていれば再ビルド時は再ダウンロードしない。
 
-必要な話者だけに絞る場合は、公式ダウンロードページの `prefix` を使い、以下の build args を上書きする。
+必要な話者だけに絞る場合は、公式ダウンロードページの `prefix` を使い、以下の環境変数を上書きする。
 
-| build arg | 説明 |
+| 環境変数 | 説明 |
 |---|---|
 | `COEIROINK_SPEAKER_SOURCE` | 公式ダウンロードページまたは `downloadableSpeakers` を含む JSON |
-| `COEIROINK_SPEAKER_PREFIXES` | 同梱する話者 prefix。空なら全件。複数指定は空白/カンマ区切り |
+| `COEIROINK_SPEAKER_PREFIXES` | 取得する話者 prefix。空なら全件。複数指定は空白/カンマ区切り |
+| `COEIROINK_FORCE_INSTALL` | `1` で volume 内の話者データを強制的に入れ直す |
 
 ### SHAREVOX の有効化
 
 Coolify の環境変数に `COMPOSE_PROFILES=sharevox` と `SHAREVOX_URL=http://sharevox:50025` を設定する。
 COEIROINK と併用する場合は `COMPOSE_PROFILES=coeiroink,sharevox` にする。
-`sharevox` サービスは SHAREVOX Engine / Core / 公式モデルを同梱する。
-モデルzipをダウンロードするため、初回ビルドには時間とディスク容量が必要。
+`sharevox` サービスは SHAREVOX resource / core / ONNX Runtime / 公式モデルを `sharevox_data` volume に保存する。OpenJTalk 辞書は `sharevox_openjtalk_dic` volume に保存する。
+モデルzipをダウンロードするため初回起動には時間とディスク容量が必要だが、volume が残っていれば再ビルド時は再ダウンロードしない。
 
-| build arg | 説明 |
+| 環境変数 | 説明 |
 |---|---|
 | `SHAREVOX_ENGINE_REF` | `sharevox_engine` のタグまたはブランチ |
 | `SHAREVOX_ENGINE_VERSION` | Engine の表示バージョン |
 | `SHAREVOX_RESOURCE_VERSION` | ダウンロードする話者情報リソースのバージョン |
 | `SHAREVOX_CORE_VERSION` | ダウンロードする `sharevox_core` のバージョン |
 | `SHAREVOX_MODEL_VERSION` | ダウンロードする公式モデルzipのバージョン |
+| `SHAREVOX_FORCE_INSTALL` | `1` で volume 内の SHAREVOX assets を強制的に入れ直す |
 
 ### デプロイ手順
 

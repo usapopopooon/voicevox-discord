@@ -72,6 +72,8 @@ DISCORD_TOKEN=token1
    - `SHAREVOX_URL` — `http://sharevox:50025`
    - `DATABASE_URL` — `postgresql://bot:bot@postgres:5432/voicevox_bot`
 
+VOICEVOX のユーザーデータは `voicevox_user_data` volume に保存します。VOICEVOX 公式イメージ本体のモデルはイメージ内に含まれるため、このプロジェクト側で毎回モデルzipをダウンロードする構成ではありません。
+
 ### COEIROINK v1 を使う場合
 
 Coolify の環境変数に以下を追加します。
@@ -81,7 +83,7 @@ COMPOSE_PROFILES=coeiroink
 COEIROINK_URL=http://coeiroink:50031
 ```
 
-`coeiroink` サービスはデフォルトで公式COEIROINKキャラクターを全件同梱してビルドします。モデルzipを多数ダウンロードするため、Coolify 側のディスク空き容量と初回ビルド時間には余裕を持たせてください。必要な話者だけに絞る場合は `COEIROINK_SPEAKER_PREFIXES` を build args として上書きします。
+`coeiroink` サービスはデフォルトで公式COEIROINKキャラクターを全件取得し、`coeiroink_speaker_info` volume に保存します。OpenJTalk 辞書は `coeiroink_openjtalk_dic` volume に保存します。初回起動時だけモデルzipを多数ダウンロードするため、Coolify 側のディスク空き容量と初回起動時間には余裕を持たせてください。以後は volume が残っていれば再ビルドしても再ダウンロードしません。必要な話者だけに絞る場合は `COEIROINK_SPEAKER_PREFIXES` を設定します。話者データを入れ直す場合は一時的に `COEIROINK_FORCE_INSTALL=1` を設定してください。
 
 ### SHAREVOX を使う場合
 
@@ -92,7 +94,7 @@ COMPOSE_PROFILES=sharevox
 SHAREVOX_URL=http://sharevox:50025
 ```
 
-COEIROINK と併用する場合は `COMPOSE_PROFILES=coeiroink,sharevox` にします。`sharevox` サービスは SHAREVOX Engine / Core / 公式モデルを同梱してビルドします。初回ビルドではモデルzipをダウンロードするため、Coolify 側のディスク空き容量と初回ビルド時間には余裕を持たせてください。
+COEIROINK と併用する場合は `COMPOSE_PROFILES=coeiroink,sharevox` にします。`sharevox` サービスは SHAREVOX resource / core / ONNX Runtime / 公式モデルを `sharevox_data` volume に保存します。OpenJTalk 辞書は `sharevox_openjtalk_dic` volume に保存します。初回起動時だけモデルzipをダウンロードするため、Coolify 側のディスク空き容量と初回起動時間には余裕を持たせてください。以後は volume が残っていれば再ビルドしても再ダウンロードしません。入れ直す場合は一時的に `SHAREVOX_FORCE_INSTALL=1` を設定してください。
 
 ## 技術スタック
 

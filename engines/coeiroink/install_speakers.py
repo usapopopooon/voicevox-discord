@@ -73,6 +73,17 @@ def _copytree_contents(src: Path, dest: Path) -> None:
             shutil.copy2(child, target)
 
 
+def _clean_directory_contents(dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    for child in dest.iterdir():
+        if child.name == "lost+found":
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
 def _extract_next_data(html_text: str) -> dict:
     marker = '<script id="__NEXT_DATA__" type="application/json">'
     start = html_text.find(marker)
@@ -147,6 +158,7 @@ def install_speakers(
     source: str,
     engine_root: Path,
     prefixes: set[str],
+    clean: bool,
 ) -> None:
     speakers = _load_speakers(source)
     if prefixes:
@@ -159,6 +171,8 @@ def install_speakers(
     total_styles = 0
     speaker_info_dir = engine_root / "speaker_info"
     speaker_info_dir.mkdir(parents=True, exist_ok=True)
+    if clean:
+        _clean_directory_contents(speaker_info_dir)
 
     with tempfile.TemporaryDirectory() as tmp_name:
         tmp = Path(tmp_name)
@@ -207,12 +221,14 @@ def main() -> int:
     parser.add_argument("--source", default=DEFAULT_SOURCE_URL)
     parser.add_argument("--engine-root", default="/opt/coeiroink_engine")
     parser.add_argument("--prefixes", default="")
+    parser.add_argument("--clean", action="store_true")
     args = parser.parse_args()
 
     install_speakers(
         source=args.source,
         engine_root=Path(args.engine_root),
         prefixes=_split_prefixes(args.prefixes),
+        clean=args.clean,
     )
     return 0
 
