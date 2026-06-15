@@ -5170,6 +5170,7 @@ class TestHelpCommand:
     def test_help_embed_contains_voice_license_urls_and_label(self):
         from bot import (
             _COEIROINK_OFFICIAL_URL,
+            _SHAREVOX_OFFICIAL_URL,
             _VOICEVOX_OFFICIAL_URL,
             _build_help_embed,
         )
@@ -5177,6 +5178,7 @@ class TestHelpCommand:
         description = _build_help_embed().description or ""
         assert _VOICEVOX_OFFICIAL_URL in description
         assert _COEIROINK_OFFICIAL_URL in description
+        assert _SHAREVOX_OFFICIAL_URL in description
         # 「各ボイスおよびライセンスはこちら」など、URL の文脈も併記されている
         assert "ライセンス" in description
 
@@ -5230,7 +5232,12 @@ class TestHelpCommand:
         interaction.response.send_message.assert_awaited_once()
 
     async def test_help_command_sends_embed_with_urls(self):
-        from bot import _COEIROINK_OFFICIAL_URL, _VOICEVOX_OFFICIAL_URL, help_cmd
+        from bot import (
+            _COEIROINK_OFFICIAL_URL,
+            _SHAREVOX_OFFICIAL_URL,
+            _VOICEVOX_OFFICIAL_URL,
+            help_cmd,
+        )
 
         interaction = _make_interaction()
         await help_cmd.callback(interaction)
@@ -5242,6 +5249,7 @@ class TestHelpCommand:
         assert isinstance(embed, discord.Embed)
         assert _VOICEVOX_OFFICIAL_URL in (embed.description or "")
         assert _COEIROINK_OFFICIAL_URL in (embed.description or "")
+        assert _SHAREVOX_OFFICIAL_URL in (embed.description or "")
 
     async def test_help_command_uses_no_prefix(self):
         """/help は接続メッセージを含まない（純粋なコマンド一覧）"""

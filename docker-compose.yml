@@ -31,11 +31,27 @@ services:
           memory: 4g
     restart: unless-stopped
 
-  # sharevox:
-  #   build:
-  #     context: ./engines/sharevox
-  #     dockerfile: Dockerfile
-  #   restart: unless-stopped
+  sharevox:
+    profiles:
+      - sharevox
+    build:
+      context: ./engines/sharevox
+      dockerfile: Dockerfile
+      args:
+        SHAREVOX_ENGINE_REF: ${SHAREVOX_ENGINE_REF:-0.2.1}
+        SHAREVOX_ENGINE_VERSION: ${SHAREVOX_ENGINE_VERSION:-0.2.1}
+        SHAREVOX_RESOURCE_VERSION: ${SHAREVOX_RESOURCE_VERSION:-0.2.1}
+        SHAREVOX_CORE_VERSION: ${SHAREVOX_CORE_VERSION:-0.2.1}
+        SHAREVOX_MODEL_VERSION: ${SHAREVOX_MODEL_VERSION:-0.2.1}
+    mem_limit: 4g
+    environment:
+      SV_CPU_NUM_THREADS: "4"
+      VV_OUTPUT_LOG_UTF8: "1"
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    restart: unless-stopped
 
   postgres:
     image: postgres:17-alpine
@@ -56,7 +72,7 @@ services:
     environment:
       VOICEVOX_URL: ${VOICEVOX_URL:-http://voicevox:50021}
       COEIROINK_URL: ${COEIROINK_URL:-http://coeiroink:50031}
-      SHAREVOX_URL: ${SHAREVOX_URL:-}
+      SHAREVOX_URL: ${SHAREVOX_URL:-http://sharevox:50025}
       DEFAULT_SPEAKER_ID: "46"
       DATABASE_URL: postgresql://bot:bot@postgres:5432/voicevox_bot
     depends_on:

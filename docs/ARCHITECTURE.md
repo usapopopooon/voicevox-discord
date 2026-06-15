@@ -247,7 +247,7 @@ Discord互換WAVなら PCMAudio で直接再生
 | `DISCORD_TOKENS` | 複数Bot起動時の Discord Bot トークン群（カンマ/改行区切り） | - |
 | `VOICEVOX_URL` | VOICEVOX Engine の URL | `http://localhost:50021` |
 | `COEIROINK_URL` | COEIROINK Engine の URL（Docker Compose では `http://coeiroink:50031`） | - |
-| `SHAREVOX_URL` | SHAREVOX Engine の URL（省略可） | - |
+| `SHAREVOX_URL` | SHAREVOX Engine の URL（Docker Compose では `http://sharevox:50025`） | - |
 | `DEFAULT_SPEAKER_ID` | デフォルト Speaker ID（46=小夜/SAYO ノーマル） | `46` |
 | `DATABASE_URL` | PostgreSQL 接続 URL | - |
 | `LOG_LEVEL` | ログレベル | `INFO` |
@@ -266,6 +266,7 @@ docker compose up
 
 - `docker-compose.override.yml` が自動マージされ、ホットリロード・ポート公開が有効になる
 - VOICEVOX: `localhost:50021`、PostgreSQL: `localhost:5432` でアクセス可能
+- `COMPOSE_PROFILES=coeiroink,sharevox` を指定すると、COEIROINK: `localhost:50031`、SHAREVOX: `localhost:50025` も公開される
 
 ## Coolify デプロイ
 
@@ -277,6 +278,7 @@ docker compose up
 | **PostgreSQL** | `postgres` サービス。`pgdata` ボリュームで永続化 |
 | **VOICEVOX** | `voicevox` サービス。`voicevox/voicevox_engine:cpu-latest` を利用 |
 | **COEIROINK v1** | 任意。`COMPOSE_PROFILES=coeiroink` で有効化し、`engines/coeiroink/Dockerfile` でビルド |
+| **SHAREVOX** | 任意。`COMPOSE_PROFILES=sharevox` で有効化し、`engines/sharevox/Dockerfile` でビルド |
 
 ### Bot の環境変数
 
@@ -285,6 +287,7 @@ docker compose up
 | `DISCORD_TOKEN` または `DISCORD_TOKENS` | Discord Developer Portal から取得（複数運用は `DISCORD_TOKENS`） |
 | `VOICEVOX_URL` | `http://voicevox:50021` |
 | `COEIROINK_URL` | `http://coeiroink:50031` |
+| `SHAREVOX_URL` | `http://sharevox:50025` |
 | `DATABASE_URL` | `postgresql://bot:bot@postgres:5432/voicevox_bot` |
 
 ### COEIROINK v1 の有効化
@@ -299,6 +302,21 @@ Coolify の環境変数に `COMPOSE_PROFILES=coeiroink` と `COEIROINK_URL=http:
 |---|---|
 | `COEIROINK_SPEAKER_SOURCE` | 公式ダウンロードページまたは `downloadableSpeakers` を含む JSON |
 | `COEIROINK_SPEAKER_PREFIXES` | 同梱する話者 prefix。空なら全件。複数指定は空白/カンマ区切り |
+
+### SHAREVOX の有効化
+
+Coolify の環境変数に `COMPOSE_PROFILES=sharevox` と `SHAREVOX_URL=http://sharevox:50025` を設定する。
+COEIROINK と併用する場合は `COMPOSE_PROFILES=coeiroink,sharevox` にする。
+`sharevox` サービスは SHAREVOX Engine / Core / 公式モデルを同梱する。
+モデルzipをダウンロードするため、初回ビルドには時間とディスク容量が必要。
+
+| build arg | 説明 |
+|---|---|
+| `SHAREVOX_ENGINE_REF` | `sharevox_engine` のタグまたはブランチ |
+| `SHAREVOX_ENGINE_VERSION` | Engine の表示バージョン |
+| `SHAREVOX_RESOURCE_VERSION` | ダウンロードする話者情報リソースのバージョン |
+| `SHAREVOX_CORE_VERSION` | ダウンロードする `sharevox_core` のバージョン |
+| `SHAREVOX_MODEL_VERSION` | ダウンロードする公式モデルzipのバージョン |
 
 ### デプロイ手順
 
@@ -316,3 +334,4 @@ Coolify の環境変数に `COMPOSE_PROFILES=coeiroink` と `COEIROINK_URL=http:
 
 - VOICEVOX: https://voicevox.hiroshiba.jp/
 - COEIROINK: https://coeiroink.com/
+- SHAREVOX: https://sharevox.app/

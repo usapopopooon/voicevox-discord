@@ -6,6 +6,9 @@ def env_setup(monkeypatch):
     """テスト用の環境変数をセット"""
     monkeypatch.setenv("DISCORD_TOKEN", "test-token")
     monkeypatch.setenv("VOICEVOX_URL", "http://test-voicevox:50021")
+    monkeypatch.delenv("COEIROINK_URL", raising=False)
+    monkeypatch.delenv("SHAREVOX_URL", raising=False)
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
     monkeypatch.setenv("DEFAULT_SPEAKER_ID", "46")
     monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
 

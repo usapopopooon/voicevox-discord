@@ -68,6 +68,8 @@ DISCORD_TOKEN=token1
 3. Bot の環境変数を設定:
    - `DISCORD_TOKEN` または `DISCORD_TOKENS` — Discord Developer Portal から取得
    - `VOICEVOX_URL` — `http://voicevox:50021`
+   - `COEIROINK_URL` — `http://coeiroink:50031`
+   - `SHAREVOX_URL` — `http://sharevox:50025`
    - `DATABASE_URL` — `postgresql://bot:bot@postgres:5432/voicevox_bot`
 
 ### COEIROINK v1 を使う場合
@@ -81,10 +83,22 @@ COEIROINK_URL=http://coeiroink:50031
 
 `coeiroink` サービスはデフォルトで公式COEIROINKキャラクターを全件同梱してビルドします。モデルzipを多数ダウンロードするため、Coolify 側のディスク空き容量と初回ビルド時間には余裕を持たせてください。必要な話者だけに絞る場合は `COEIROINK_SPEAKER_PREFIXES` を build args として上書きします。
 
+### SHAREVOX を使う場合
+
+Coolify の環境変数に以下を追加します。
+
+```env
+COMPOSE_PROFILES=sharevox
+SHAREVOX_URL=http://sharevox:50025
+```
+
+COEIROINK と併用する場合は `COMPOSE_PROFILES=coeiroink,sharevox` にします。`sharevox` サービスは SHAREVOX Engine / Core / 公式モデルを同梱してビルドします。初回ビルドではモデルzipをダウンロードするため、Coolify 側のディスク空き容量と初回ビルド時間には余裕を持たせてください。
+
 ## 技術スタック
 
 - Python 3.12 / discord.py (voice)
 - VOICEVOX Engine (CPU版)
+- COEIROINK v1 / SHAREVOX（任意）
 - PostgreSQL + asyncpg
 - Docker Compose (ローカル / Coolify 本番)
 - GitHub Actions (ruff + pytest)
@@ -108,3 +122,4 @@ COEIROINK_URL=http://coeiroink:50031
 
 - VOICEVOX: https://voicevox.hiroshiba.jp/
 - COEIROINK: https://coeiroink.com/
+- SHAREVOX: https://sharevox.app/

@@ -137,10 +137,10 @@ def _engine_url(
     profile: str | None = None,
     profile_default: str = "",
 ) -> str:
-    if profile and _compose_profile_enabled(profile):
-        return profile_default
     if url := os.getenv(env_name):
         return url
+    if profile and _compose_profile_enabled(profile):
+        return profile_default
     return default
 
 
@@ -157,7 +157,15 @@ ENGINES: list[tuple[str, str, int]] = [
         ),
         10000,
     ),
-    ("SHAREVOX", _engine_url("SHAREVOX_URL"), 20000),
+    (
+        "SHAREVOX",
+        _engine_url(
+            "SHAREVOX_URL",
+            profile="sharevox",
+            profile_default="http://sharevox:50025",
+        ),
+        20000,
+    ),
 ]
 ENGINES = [(name, url, offset) for name, url, offset in ENGINES if url]
 
@@ -2469,6 +2477,7 @@ async def on_guild_remove(guild: discord.Guild):
 
 _VOICEVOX_OFFICIAL_URL = "https://voicevox.hiroshiba.jp/"
 _COEIROINK_OFFICIAL_URL = "https://coeiroink.com/"
+_SHAREVOX_OFFICIAL_URL = "https://sharevox.app/"
 
 
 def _attachment_category(content_type: str | None) -> str:
@@ -2535,7 +2544,8 @@ def _build_help_embed(prefix: str | None = None) -> discord.Embed:
         "`/help` — このヘルプを表示\n\n"
         "各ボイスおよびライセンスはこちら:\n"
         f"VOICEVOX: {_VOICEVOX_OFFICIAL_URL}\n"
-        f"COEIROINK: {_COEIROINK_OFFICIAL_URL}"
+        f"COEIROINK: {_COEIROINK_OFFICIAL_URL}\n"
+        f"SHAREVOX: {_SHAREVOX_OFFICIAL_URL}"
     )
     description = f"{prefix}\n\n{body}" if prefix else body
     return discord.Embed(
@@ -2862,7 +2872,7 @@ async def showmute_cmd(interaction: discord.Interaction):
 
 @tree.command(name="speaker", description="自分の読み上げキャラクターを変更")
 @app_commands.describe(
-    engine="音声エンジン（例: VOICEVOX / COEIROINK）",
+    engine="音声エンジン（例: VOICEVOX / COEIROINK / SHAREVOX）",
     character="キャラクター名（例: ずんだもん）",
     style="スタイル名（省略時: 先頭のスタイル）",
 )
