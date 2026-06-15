@@ -58,9 +58,17 @@ def _safe_extract(zip_path: Path, dest: Path) -> None:
         zf.extractall(dest)
 
 
-def _copytree_contents(src: Path, dest: Path) -> None:
+def _copytree_contents(
+    src: Path,
+    dest: Path,
+    *,
+    skip_names: set[str] | None = None,
+) -> None:
+    skip_names = skip_names or set()
     dest.mkdir(parents=True, exist_ok=True)
     for child in src.iterdir():
+        if child.name in skip_names:
+            continue
         target = dest / child.name
         if target.exists():
             if target.is_dir():
@@ -128,6 +136,10 @@ def _find_style_dir(root: Path, style_id: str) -> Path:
     return candidates[0]
 
 
+def _style_installed(style_dir: Path) -> bool:
+    return (style_dir / "config.yaml").exists()
+
+
 def _filter_meta_styles(speaker_dir: Path) -> int:
     meta_path = speaker_dir / "metas.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -180,8 +192,8 @@ def install_speakers(
             name = speaker["speakerName"]
             speaker_uuid = speaker["speakerUuid"]
             speaker_dir = speaker_info_dir / speaker_uuid
-            if speaker_dir.exists():
-                shutil.rmtree(speaker_dir)
+            model_dir = speaker_dir / "model"
+            model_dir.mkdir(parents=True, exist_ok=True)
 
             print(f"Installing COEIROINK speaker: {name} ({speaker_uuid})")
             meta_zip = tmp / f"{speaker_uuid}-meta.zip"
@@ -189,18 +201,28 @@ def install_speakers(
             _download(speaker["metaDownloadUrl"], meta_zip)
             meta_extract.mkdir()
             _safe_extract(meta_zip, meta_extract)
-            _copytree_contents(_find_metas_dir(meta_extract), speaker_dir)
-            (speaker_dir / "model").mkdir(parents=True, exist_ok=True)
+            # Refresh metadata every run so interrupted installs can resume with a
+            # complete metas.json while preserving already downloaded model dirs.
+            _copytree_contents(
+                _find_metas_dir(meta_extract),
+                speaker_dir,
+                skip_names={"model"},
+            )
+            model_dir.mkdir(parents=True, exist_ok=True)
 
             for style in speaker["styles"]:
                 style_id = str(style["styleId"])
+                dest = model_dir / style_id
+                if _style_installed(dest):
+                    print(f"Skipping installed COEIROINK style: {name} ({style_id})")
+                    continue
+
                 style_zip = tmp / f"{speaker_uuid}-{style_id}.zip"
                 style_extract = tmp / f"{speaker_uuid}-{style_id}"
                 _download(style["downloadUrl"], style_zip)
                 style_extract.mkdir()
                 _safe_extract(style_zip, style_extract)
                 style_dir = _find_style_dir(style_extract, style_id)
-                dest = speaker_dir / "model" / style_id
                 if dest.exists():
                     shutil.rmtree(dest)
                 shutil.copytree(style_dir, dest)

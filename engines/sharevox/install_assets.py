@@ -160,6 +160,21 @@ def _ensure_openjtalk_dict() -> None:
 
 
 def _install_resource(tmp: Path, data_dir: Path, payload: dict[str, str]) -> None:
+    if (
+        (data_dir / "speaker_info").exists()
+        and (data_dir / "engine" / "engine_manifest.json").exists()
+        and (data_dir / "engine" / "engine_manifest_assets").exists()
+    ):
+        print("Skipping installed SHAREVOX resource")
+        return
+
+    for path in (
+        data_dir / "speaker_info",
+        data_dir / "engine",
+    ):
+        if path.exists():
+            shutil.rmtree(path)
+
     resource_dir = tmp / "sharevox_resource"
     subprocess.run(
         [
@@ -196,6 +211,13 @@ def _install_resource(tmp: Path, data_dir: Path, payload: dict[str, str]) -> Non
 
 
 def _install_core(tmp: Path, data_dir: Path, payload: dict[str, str]) -> None:
+    core_dir = data_dir / "core"
+    if core_dir.exists() and any(core_dir.iterdir()):
+        print("Skipping installed SHAREVOX core")
+        return
+    if core_dir.exists():
+        shutil.rmtree(core_dir)
+
     core_asset = (
         f"sharevox_core-linux-{payload['core_arch']}-cpu-{payload['core_version']}"
     )
@@ -212,6 +234,13 @@ def _install_core(tmp: Path, data_dir: Path, payload: dict[str, str]) -> None:
 
 
 def _install_onnxruntime(tmp: Path, data_dir: Path, payload: dict[str, str]) -> None:
+    runtime_dir = data_dir / "onnxruntime"
+    if (runtime_dir / "lib").exists():
+        print("Skipping installed ONNX Runtime")
+        return
+    if runtime_dir.exists():
+        shutil.rmtree(runtime_dir)
+
     archive = (
         "onnxruntime-linux-"
         f"{payload['onnxruntime_arch']}-{payload['onnxruntime_version']}"
@@ -229,6 +258,13 @@ def _install_onnxruntime(tmp: Path, data_dir: Path, payload: dict[str, str]) -> 
 
 
 def _install_model(tmp: Path, data_dir: Path, payload: dict[str, str]) -> None:
+    model_dir = data_dir / "model"
+    if (model_dir / "libraries.json").exists():
+        print("Skipping installed SHAREVOX model")
+        return
+    if model_dir.exists():
+        shutil.rmtree(model_dir)
+
     model_asset = f"sharevox_model-{payload['model_version']}"
     zip_path = tmp / "sharevox_model.zip"
     _download(
@@ -285,13 +321,16 @@ def install_assets(data_dir: Path, engine_root: Path, force: bool) -> None:
 
     if needs_install:
         print(f"Installing SHAREVOX assets into {data_dir}", flush=True)
-        _clean_directory(data_dir)
+        if force or manifest_path.exists():
+            _clean_directory(data_dir)
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
             _install_resource(tmp, data_dir, payload)
             _install_core(tmp, data_dir, payload)
             _install_onnxruntime(tmp, data_dir, payload)
             _install_model(tmp, data_dir, payload)
+        if not _required_assets_exist(data_dir):
+            raise RuntimeError(f"SHAREVOX asset install is incomplete: {data_dir}")
         manifest_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",

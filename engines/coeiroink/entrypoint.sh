@@ -14,8 +14,10 @@ mkdir -p "$SPEAKER_INFO_DIR"
 python /usr/local/bin/coeiroink_ensure_openjtalk_dict.py
 
 needs_install=0
+clean_args=()
 if [ "$FORCE_INSTALL" = "1" ] || [ "$FORCE_INSTALL" = "true" ]; then
   needs_install=1
+  clean_args=(--clean)
 elif ! find "$SPEAKER_INFO_DIR" -mindepth 2 -name metas.json -type f | grep -q .; then
   needs_install=1
 elif ! python /usr/local/bin/coeiroink_manifest.py check \
@@ -24,6 +26,9 @@ elif ! python /usr/local/bin/coeiroink_manifest.py check \
     --prefixes "$PREFIXES" \
     --installer-version "$INSTALLER_VERSION"; then
   needs_install=1
+  if [ -f "$MANIFEST" ]; then
+    clean_args=(--clean)
+  fi
 fi
 
 if [ "$needs_install" = "1" ]; then
@@ -32,7 +37,7 @@ if [ "$needs_install" = "1" ]; then
     --source "$SOURCE" \
     --engine-root "$ENGINE_ROOT" \
     --prefixes "$PREFIXES" \
-    --clean
+    "${clean_args[@]}"
   python /usr/local/bin/coeiroink_manifest.py write \
     --manifest "$MANIFEST" \
     --source "$SOURCE" \
