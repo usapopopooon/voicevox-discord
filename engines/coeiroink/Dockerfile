@@ -42,28 +42,19 @@ RUN python -m pip install --no-cache-dir \
     numba==0.56.4 \
     llvmlite==0.39.1
 
+COPY install_speakers.py /tmp/install_speakers.py
+
 ARG COEIROINK_SPEAKER_SOURCE=https://coeiroink.com/download
 ARG COEIROINK_SPEAKER_PREFIXES=
-ENV COEIROINK_SPEAKER_SOURCE=${COEIROINK_SPEAKER_SOURCE}
-ENV COEIROINK_SPEAKER_PREFIXES=${COEIROINK_SPEAKER_PREFIXES}
-ENV COEIROINK_SPEAKER_INFO_DIR=/opt/coeiroink_engine/speaker_info
-
-COPY install_speakers.py /usr/local/bin/coeiroink_install_speakers.py
-COPY manifest.py /usr/local/bin/coeiroink_manifest.py
-COPY ensure_openjtalk_dict.py /usr/local/bin/coeiroink_ensure_openjtalk_dict.py
-COPY entrypoint.sh /usr/local/bin/coeiroink-entrypoint.sh
-
-RUN mkdir -p /opt/coeiroink_engine/speaker_info && \
-    chmod +x \
-      /usr/local/bin/coeiroink_install_speakers.py \
-      /usr/local/bin/coeiroink_manifest.py \
-      /usr/local/bin/coeiroink_ensure_openjtalk_dict.py \
-      /usr/local/bin/coeiroink-entrypoint.sh
+RUN python /tmp/install_speakers.py \
+    --source "$COEIROINK_SPEAKER_SOURCE" \
+    --engine-root /opt/coeiroink_engine \
+    --prefixes "$COEIROINK_SPEAKER_PREFIXES" && \
+    rm /tmp/install_speakers.py
 
 EXPOSE 50031
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=3600s --retries=5 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=5 \
     CMD curl -fsS http://localhost:50031/speakers >/dev/null || exit 1
 
-ENTRYPOINT ["coeiroink-entrypoint.sh"]
 CMD ["python", "run.py", "--host", "0.0.0.0", "--port", "50031", "--voicelib_dir", "/opt/coeiroink_engine"]

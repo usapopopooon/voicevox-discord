@@ -58,17 +58,9 @@ def _safe_extract(zip_path: Path, dest: Path) -> None:
         zf.extractall(dest)
 
 
-def _copytree_contents(
-    src: Path,
-    dest: Path,
-    *,
-    skip_names: set[str] | None = None,
-) -> None:
-    skip_names = skip_names or set()
+def _copytree_contents(src: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     for child in src.iterdir():
-        if child.name in skip_names:
-            continue
         target = dest / child.name
         if target.exists():
             if target.is_dir():
@@ -79,17 +71,6 @@ def _copytree_contents(
             shutil.copytree(child, target)
         else:
             shutil.copy2(child, target)
-
-
-def _clean_directory_contents(dest: Path) -> None:
-    dest.mkdir(parents=True, exist_ok=True)
-    for child in dest.iterdir():
-        if child.name == "lost+found":
-            continue
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
 
 
 def _extract_next_data(html_text: str) -> dict:
@@ -136,10 +117,6 @@ def _find_style_dir(root: Path, style_id: str) -> Path:
     return candidates[0]
 
 
-def _style_installed(style_dir: Path) -> bool:
-    return (style_dir / "config.yaml").exists() and any(style_dir.rglob("*.pth"))
-
-
 def _filter_meta_styles(speaker_dir: Path) -> int:
     meta_path = speaker_dir / "metas.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -170,7 +147,6 @@ def install_speakers(
     source: str,
     engine_root: Path,
     prefixes: set[str],
-    clean: bool,
 ) -> None:
     speakers = _load_speakers(source)
     if prefixes:
@@ -183,8 +159,6 @@ def install_speakers(
     total_styles = 0
     speaker_info_dir = engine_root / "speaker_info"
     speaker_info_dir.mkdir(parents=True, exist_ok=True)
-    if clean:
-        _clean_directory_contents(speaker_info_dir)
 
     with tempfile.TemporaryDirectory() as tmp_name:
         tmp = Path(tmp_name)
@@ -192,8 +166,8 @@ def install_speakers(
             name = speaker["speakerName"]
             speaker_uuid = speaker["speakerUuid"]
             speaker_dir = speaker_info_dir / speaker_uuid
-            model_dir = speaker_dir / "model"
-            model_dir.mkdir(parents=True, exist_ok=True)
+            if speaker_dir.exists():
+                shutil.rmtree(speaker_dir)
 
             print(f"Installing COEIROINK speaker: {name} ({speaker_uuid})")
             meta_zip = tmp / f"{speaker_uuid}-meta.zip"
@@ -201,28 +175,18 @@ def install_speakers(
             _download(speaker["metaDownloadUrl"], meta_zip)
             meta_extract.mkdir()
             _safe_extract(meta_zip, meta_extract)
-            # Refresh metadata every run so interrupted installs can resume with a
-            # complete metas.json while preserving already downloaded model dirs.
-            _copytree_contents(
-                _find_metas_dir(meta_extract),
-                speaker_dir,
-                skip_names={"model"},
-            )
-            model_dir.mkdir(parents=True, exist_ok=True)
+            _copytree_contents(_find_metas_dir(meta_extract), speaker_dir)
+            (speaker_dir / "model").mkdir(parents=True, exist_ok=True)
 
             for style in speaker["styles"]:
                 style_id = str(style["styleId"])
-                dest = model_dir / style_id
-                if _style_installed(dest):
-                    print(f"Skipping installed COEIROINK style: {name} ({style_id})")
-                    continue
-
                 style_zip = tmp / f"{speaker_uuid}-{style_id}.zip"
                 style_extract = tmp / f"{speaker_uuid}-{style_id}"
                 _download(style["downloadUrl"], style_zip)
                 style_extract.mkdir()
                 _safe_extract(style_zip, style_extract)
                 style_dir = _find_style_dir(style_extract, style_id)
+                dest = speaker_dir / "model" / style_id
                 if dest.exists():
                     shutil.rmtree(dest)
                 shutil.copytree(style_dir, dest)
@@ -243,14 +207,12 @@ def main() -> int:
     parser.add_argument("--source", default=DEFAULT_SOURCE_URL)
     parser.add_argument("--engine-root", default="/opt/coeiroink_engine")
     parser.add_argument("--prefixes", default="")
-    parser.add_argument("--clean", action="store_true")
     args = parser.parse_args()
 
     install_speakers(
         source=args.source,
         engine_root=Path(args.engine_root),
         prefixes=_split_prefixes(args.prefixes),
-        clean=args.clean,
     )
     return 0
 
