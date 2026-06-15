@@ -290,16 +290,15 @@ docker compose up
 ### COEIROINK v1 の有効化
 
 Coolify の環境変数に `COMPOSE_PROFILES=coeiroink` と `COEIROINK_URL=http://coeiroink:50031` を設定する。
-`coeiroink` サービスはデフォルトで「つくよみちゃん / れいせい」モデルを同梱する。
-モデルzipは約330MBあり、Python/Torch系依存も重いため、初回ビルドには時間とディスク容量が必要。
+`coeiroink` サービスはデフォルトで公式COEIROINKキャラクターを全件同梱する。
+モデルzipを多数ダウンロードし、Python/Torch系依存も重いため、初回ビルドには時間とディスク容量が必要。
 
-追加スタイルや別キャラクターを使う場合は、公式ダウンロードページの `metaDownloadUrl` と各スタイルの `downloadUrl` を使い、以下の build args を上書きする。
+必要な話者だけに絞る場合は、公式ダウンロードページの `prefix` を使い、以下の build args を上書きする。
 
 | build arg | 説明 |
 |---|---|
-| `COEIROINK_SPEAKER_UUID` | `speaker_info/<uuid>` に使う話者 UUID |
-| `COEIROINK_META_ZIP_URL` | `metas.json` / アイコン / サンプル音声を含む meta zip |
-| `COEIROINK_STYLE_ZIP_URLS` | `config.yaml` と `.pth` を含む style zip URL。複数指定する場合はスペース区切り |
+| `COEIROINK_SPEAKER_SOURCE` | 公式ダウンロードページまたは `downloadableSpeakers` を含む JSON |
+| `COEIROINK_SPEAKER_PREFIXES` | 同梱する話者 prefix。空なら全件。複数指定は空白/カンマ区切り |
 
 ### デプロイ手順
 

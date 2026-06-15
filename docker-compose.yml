@@ -19,9 +19,8 @@ services:
       dockerfile: Dockerfile
       args:
         COEIROINK_ENGINE_REF: ${COEIROINK_ENGINE_REF:-c-1.6.0+v-0.12.3}
-        COEIROINK_SPEAKER_UUID: ${COEIROINK_SPEAKER_UUID:-3c37646f-3881-5374-2a83-149267990abc}
-        COEIROINK_META_ZIP_URL: ${COEIROINK_META_ZIP_URL:-https://www.dropbox.com/scl/fi/2xzh92hf0s4tk7ptltypl/tsukuyomichan-2.0.0.zip?rlkey=sxrzgr3gferkk45o5jzbyvrfy&st=u5d6t01l&dl=1}
-        COEIROINK_STYLE_ZIP_URLS: ${COEIROINK_STYLE_ZIP_URLS:-https://www.dropbox.com/scl/fi/gueh24t2iqwhcouf4y48s/0-1.0.0.zip?rlkey=l0wkgov5x0c2g79o73gmrvjk9&st=dxfgrmgf&dl=1}
+        COEIROINK_SPEAKER_SOURCE: ${COEIROINK_SPEAKER_SOURCE:-https://coeiroink.com/download}
+        COEIROINK_SPEAKER_PREFIXES: ${COEIROINK_SPEAKER_PREFIXES:-}
     mem_limit: 4g
     environment:
       VV_CPU_NUM_THREADS: "4"

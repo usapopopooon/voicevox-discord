@@ -42,32 +42,15 @@ RUN python -m pip install --no-cache-dir \
     numba==0.56.4 \
     llvmlite==0.39.1
 
-ARG COEIROINK_SPEAKER_UUID=3c37646f-3881-5374-2a83-149267990abc
-ARG COEIROINK_META_ZIP_URL=https://www.dropbox.com/scl/fi/2xzh92hf0s4tk7ptltypl/tsukuyomichan-2.0.0.zip?rlkey=sxrzgr3gferkk45o5jzbyvrfy&st=u5d6t01l&dl=1
-ARG COEIROINK_STYLE_ZIP_URLS=https://www.dropbox.com/scl/fi/gueh24t2iqwhcouf4y48s/0-1.0.0.zip?rlkey=l0wkgov5x0c2g79o73gmrvjk9&st=dxfgrmgf&dl=1
+COPY install_speakers.py /tmp/install_speakers.py
 
-RUN set -eux; \
-    speaker_dir="speaker_info/${COEIROINK_SPEAKER_UUID}"; \
-    mkdir -p "$speaker_dir/model"; \
-    curl -fsSL "$COEIROINK_META_ZIP_URL" -o /tmp/coeiroink-meta.zip; \
-    unzip -q /tmp/coeiroink-meta.zip -d /tmp/coeiroink-meta; \
-    meta_dir="$(find /tmp/coeiroink-meta -name metas.json -exec dirname {} \; | head -n 1)"; \
-    cp -a "$meta_dir"/. "$speaker_dir"/; \
-    for url in $COEIROINK_STYLE_ZIP_URLS; do \
-        rm -rf /tmp/coeiroink-style; \
-        mkdir -p /tmp/coeiroink-style; \
-        curl -fsSL "$url" -o /tmp/coeiroink-style.zip; \
-        unzip -q /tmp/coeiroink-style.zip -d /tmp/coeiroink-style; \
-        for model_dir in /tmp/coeiroink-style/*; do \
-            [ -f "$model_dir/config.yaml" ] || continue; \
-            style_id="$(basename "$model_dir")"; \
-            mkdir -p "$speaker_dir/model/$style_id"; \
-            cp -a "$model_dir"/. "$speaker_dir/model/$style_id"/; \
-        done; \
-    done; \
-    python -c 'import json, sys; from pathlib import Path; speaker_dir = Path(sys.argv[1]); meta_path = speaker_dir / "metas.json"; meta = json.loads(meta_path.read_text(encoding="utf-8")); installed = {p.name for p in (speaker_dir / "model").iterdir() if p.is_dir()}; meta["styles"] = [s for s in meta["styles"] if str(s["styleId"]) in installed]; assert meta["styles"], "No COEIROINK speaker styles were installed"; meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=4), encoding="utf-8")' "$speaker_dir"; \
-    rm -rf /tmp/coeiroink-meta /tmp/coeiroink-meta.zip \
-        /tmp/coeiroink-style /tmp/coeiroink-style.zip
+ARG COEIROINK_SPEAKER_SOURCE=https://coeiroink.com/download
+ARG COEIROINK_SPEAKER_PREFIXES=
+RUN python /tmp/install_speakers.py \
+    --source "$COEIROINK_SPEAKER_SOURCE" \
+    --engine-root /opt/coeiroink_engine \
+    --prefixes "$COEIROINK_SPEAKER_PREFIXES" && \
+    rm /tmp/install_speakers.py
 
 EXPOSE 50031
 

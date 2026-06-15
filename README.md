@@ -79,7 +79,7 @@ COMPOSE_PROFILES=coeiroink
 COEIROINK_URL=http://coeiroink:50031
 ```
 
-`coeiroink` サービスはデフォルトで「つくよみちゃん / れいせい」モデルを同梱してビルドします。モデルzipが約330MBあるため、Coolify 側のディスク空き容量には余裕を持たせてください。別キャラクターや追加スタイルを使う場合は `COEIROINK_META_ZIP_URL` / `COEIROINK_STYLE_ZIP_URLS` / `COEIROINK_SPEAKER_UUID` を build args として上書きします。
+`coeiroink` サービスはデフォルトで公式COEIROINKキャラクターを全件同梱してビルドします。モデルzipを多数ダウンロードするため、Coolify 側のディスク空き容量と初回ビルド時間には余裕を持たせてください。必要な話者だけに絞る場合は `COEIROINK_SPEAKER_PREFIXES` を build args として上書きします。
 
 ## 技術スタック
 
