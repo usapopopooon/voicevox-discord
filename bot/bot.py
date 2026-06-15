@@ -2535,7 +2535,7 @@ def _build_help_embed(prefix: str | None = None) -> discord.Embed:
         "`/join` — VCに接続\n"
         "`/leave` — VCから切断\n"
         "`/skip` — 読み上げをスキップ\n"
-        "`/speaker` — 音声エンジン・キャラクター変更\n"
+        "`/speaker` — 読み上げキャラクター変更\n"
         "`/voice` — 話速・音高・抑揚・音量\n"
         "`/dict` — 読み上げ辞書の管理\n"
         "`/mute` — ユーザーをミュート\n"
@@ -2872,13 +2872,11 @@ async def showmute_cmd(interaction: discord.Interaction):
 
 @tree.command(name="speaker", description="自分の読み上げキャラクターを変更")
 @app_commands.describe(
-    engine="音声エンジン（例: VOICEVOX / COEIROINK / SHAREVOX）",
-    character="キャラクター名（例: ずんだもん）",
+    character="キャラクター名（例: [VOICEVOX] ずんだもん）",
     style="スタイル名（省略時: 先頭のスタイル）",
 )
 async def speaker(
     interaction: discord.Interaction,
-    engine: str,
     character: str,
     style: str | None = None,
 ):
@@ -2897,20 +2895,12 @@ async def speaker(
         )
         return
 
-    matched_engine = _match_speaker_engine(engine)
-    if not matched_engine:
-        await interaction.response.send_message(
-            f"「{engine}」に一致する音声エンジンが見つかりません\n"
-            f"利用可能: {', '.join(_configured_speaker_engines())}"
-        )
-        return
-
     # キャラクター名で検索（完全一致優先、無ければ最初の部分一致）
-    matched_char = _match_speaker_character(matched_engine, character)
+    matched_char = _match_speaker_character(character)
 
     if not matched_char:
         await interaction.response.send_message(
-            f"「{matched_engine}」にキャラクター「{character}」が見つかりません"
+            f"キャラクター「{character}」が見つかりません"
         )
         return
 
@@ -2921,7 +2911,7 @@ async def speaker(
     if not matched_style:
         style_names = ", ".join(s[1] for s in styles)
         await interaction.response.send_message(
-            f"「{_speaker_character_display_name(matched_char)}」に"
+            f"「{matched_char}」に"
             f"スタイル「{style}」がありません\n"
             f"利用可能: {style_names}"
         )
@@ -2942,62 +2932,17 @@ async def speaker(
     await interaction.response.send_message(f"キャラクターを「{name}」に変更しました")
 
 
-def _configured_speaker_engines() -> list[str]:
-    return [name for name, _, _ in ENGINES]
-
-
-def _match_speaker_engine(engine: str) -> str | None:
-    query = engine.strip().lower()
-    if not query:
-        return None
-
-    partial = None
-    for engine_name in _configured_speaker_engines():
-        lowered = engine_name.lower()
-        if query == lowered:
-            return engine_name
-        if partial is None and query in lowered:
-            partial = engine_name
-    return partial
-
-
-def _speaker_character_engine(char_name: str) -> str | None:
-    for engine_name in _configured_speaker_engines():
-        prefix = f"[{engine_name}] "
-        if char_name.startswith(prefix):
-            return engine_name
-    engines = _configured_speaker_engines()
-    return engines[0] if len(engines) == 1 else None
-
-
-def _speaker_character_display_name(char_name: str) -> str:
-    for engine_name in _configured_speaker_engines():
-        prefix = f"[{engine_name}] "
-        if char_name.startswith(prefix):
-            return char_name.removeprefix(prefix)
-    return char_name
-
-
-def _speaker_characters_for_engine(engine: str) -> list[tuple[str, str]]:
-    return [
-        (char_name, _speaker_character_display_name(char_name))
-        for char_name in characters
-        if _speaker_character_engine(char_name) == engine
-    ]
-
-
-def _match_speaker_character(engine: str, character: str) -> str | None:
+def _match_speaker_character(character: str) -> str | None:
     query = character.strip().lower()
     if not query:
         return None
 
     partial = None
-    for char_name, display_name in _speaker_characters_for_engine(engine):
+    for char_name in characters:
         lowered_key = char_name.lower()
-        lowered_display = display_name.lower()
-        if query in {lowered_key, lowered_display}:
+        if query == lowered_key:
             return char_name
-        if partial is None and (query in lowered_key or query in lowered_display):
+        if partial is None and query in lowered_key:
             partial = char_name
     return partial
 
@@ -3031,23 +2976,11 @@ def _interaction_option_value(
     return None
 
 
-@speaker.autocomplete("engine")
-async def speaker_engine_autocomplete(
-    interaction: discord.Interaction, current: str
-) -> list[app_commands.Choice[str]]:
-    _ = interaction
-    query = current.lower()
-    return [
-        app_commands.Choice(name=engine_name, value=engine_name)
-        for engine_name in _configured_speaker_engines()
-        if current == "" or query in engine_name.lower()
-    ][:25]
-
-
 @speaker.autocomplete("character")
 async def speaker_char_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
+    _ = interaction
     if not characters and not speaker_engine:
         _spawn_background(_refresh_speakers_if_needed())
     elif characters:
@@ -3056,19 +2989,11 @@ async def speaker_char_autocomplete(
     if not characters:
         return []
 
-    engine_input = _interaction_option_value(interaction, "engine")
-    if not engine_input:
-        return []
-
-    matched_engine = _match_speaker_engine(engine_input)
-    if not matched_engine:
-        return []
-
     query = current.lower()
     choices = []
-    for _, display_name in _speaker_characters_for_engine(matched_engine):
-        if current == "" or query in display_name.lower():
-            choices.append(app_commands.Choice(name=display_name, value=display_name))
+    for char_name in characters:
+        if current == "" or query in char_name.lower():
+            choices.append(app_commands.Choice(name=char_name, value=char_name))
             if len(choices) >= 25:
                 break
     return choices
@@ -3081,18 +3006,13 @@ async def speaker_style_autocomplete(
     if characters:
         _schedule_missing_speaker_refresh()
 
-    engine_input = _interaction_option_value(interaction, "engine")
-    matched_engine = _match_speaker_engine(engine_input or "")
-    if not matched_engine:
-        return []
-
     char_input = _interaction_option_value(interaction, "character")
 
     if not char_input or not characters:
         return []
 
     # キャラクター名でマッチ
-    matched_char = _match_speaker_character(matched_engine, char_input)
+    matched_char = _match_speaker_character(char_input)
     if not matched_char:
         return []
 

@@ -2128,9 +2128,7 @@ class TestSpeakerCommand:
         bot.characters.clear()
         try:
             interaction = _make_interaction()
-            await speaker.callback(
-                interaction, engine="VOICEVOX", character="ずんだもん"
-            )
+            await speaker.callback(interaction, character="ずんだもん")
             interaction.response.send_message.assert_awaited_once_with(
                 "スピーカー情報がまだ読み込まれていません"
             )
@@ -2145,9 +2143,7 @@ class TestSpeakerCommand:
         try:
             interaction = _make_interaction()
             with patch("bot._refresh_missing_speakers_if_needed", new=AsyncMock()):
-                await speaker.callback(
-                    interaction, engine="VOICEVOX", character="存在しないキャラ"
-                )
+                await speaker.callback(interaction, character="存在しないキャラ")
             msg = interaction.response.send_message.await_args.args[0]
             assert "見つかりません" in msg
         finally:
@@ -2163,7 +2159,6 @@ class TestSpeakerCommand:
             with patch("bot._refresh_missing_speakers_if_needed", new=AsyncMock()):
                 await speaker.callback(
                     interaction,
-                    engine="VOICEVOX",
                     character="ずんだもん",
                     style="ありえないスタイル",
                 )
@@ -2183,7 +2178,6 @@ class TestSpeakerCommand:
             with patch("bot._refresh_missing_speakers_if_needed", new=AsyncMock()):
                 await speaker.callback(
                     interaction,
-                    engine="VOICEVOX",
                     character="ずんだもん",
                     style="あまあま",
                 )
@@ -2206,9 +2200,7 @@ class TestSpeakerCommand:
         try:
             interaction = _make_interaction(guild_id=611, user_id=612)
             with patch("bot._refresh_missing_speakers_if_needed", new=AsyncMock()):
-                await speaker.callback(
-                    interaction, engine="VOICEVOX", character="ずんだ"
-                )
+                await speaker.callback(interaction, character="ずんだ")
             assert bot.user_settings[(611, 612)].speaker_id == 99
         finally:
             bot.user_settings.pop((611, 612), None)
@@ -2238,8 +2230,7 @@ class TestSpeakerCommand:
                 interaction = _make_interaction(guild_id=621, user_id=622)
                 await speaker.callback(
                     interaction,
-                    engine="COEIROINK",
-                    character="つくよみちゃん",
+                    character="[COEIROINK] つくよみちゃん",
                 )
             assert bot.user_settings[(621, 622)].speaker_id == 10000
         finally:
@@ -3151,13 +3142,6 @@ class TestJoinCommand:
 
 
 class TestSpeakerAutocomplete:
-    async def test_engine_autocomplete_returns_configured_engines(self):
-        from bot import speaker_engine_autocomplete
-
-        result = await speaker_engine_autocomplete(MagicMock(), "")
-        names = [c.name for c in result]
-        assert "VOICEVOX" in names
-
     async def test_character_autocomplete_empty(self):
         import bot
         from bot import speaker_char_autocomplete
@@ -3178,7 +3162,7 @@ class TestSpeakerAutocomplete:
         bot.characters["四国めたん"] = [(2, "ノーマル")]
         try:
             interaction = MagicMock()
-            interaction.data = {"options": [{"name": "engine", "value": "VOICEVOX"}]}
+            interaction.data = {"options": []}
             result = await speaker_char_autocomplete(interaction, "ずんだ")
             names = [c.name for c in result]
             assert "ずんだもん" in names
@@ -3195,7 +3179,7 @@ class TestSpeakerAutocomplete:
         bot.characters["B"] = [(2, "y")]
         try:
             interaction = MagicMock()
-            interaction.data = {"options": [{"name": "engine", "value": "VOICEVOX"}]}
+            interaction.data = {"options": []}
             result = await speaker_char_autocomplete(interaction, "")
             names = [c.name for c in result]
             assert set(names) == {"A", "B"}
@@ -3203,28 +3187,19 @@ class TestSpeakerAutocomplete:
             bot.characters.pop("A", None)
             bot.characters.pop("B", None)
 
-    async def test_character_autocomplete_filters_by_engine(self):
+    async def test_character_autocomplete_includes_engine_prefixes(self):
         import bot
         from bot import speaker_char_autocomplete
 
         bot.characters["[VOICEVOX] ずんだもん"] = [(3, "ノーマル")]
         bot.characters["[COEIROINK] つくよみちゃん"] = [(10000, "れいせい")]
         try:
-            with patch.object(
-                bot,
-                "ENGINES",
-                [
-                    ("VOICEVOX", "http://voicevox:50021", 0),
-                    ("COEIROINK", "http://coeiroink:50031", 10000),
-                ],
-            ):
-                interaction = MagicMock()
-                interaction.data = {
-                    "options": [{"name": "engine", "value": "COEIROINK"}]
-                }
-                result = await speaker_char_autocomplete(interaction, "")
+            interaction = MagicMock()
+            interaction.data = {"options": []}
+            result = await speaker_char_autocomplete(interaction, "")
             names = [c.name for c in result]
-            assert names == ["つくよみちゃん"]
+            assert "[VOICEVOX] ずんだもん" in names
+            assert "[COEIROINK] つくよみちゃん" in names
         finally:
             bot.characters.pop("[VOICEVOX] ずんだもん", None)
             bot.characters.pop("[COEIROINK] つくよみちゃん", None)
@@ -3258,7 +3233,6 @@ class TestSpeakerAutocomplete:
             interaction = MagicMock()
             interaction.data = {
                 "options": [
-                    {"name": "engine", "value": "VOICEVOX"},
                     {"name": "character", "value": "ずんだもん"},
                 ]
             }
@@ -3278,7 +3252,6 @@ class TestSpeakerAutocomplete:
             interaction = MagicMock()
             interaction.data = {
                 "options": [
-                    {"name": "engine", "value": "VOICEVOX"},
                     {"name": "character", "value": "存在しない"},
                 ]
             }

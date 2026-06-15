@@ -81,7 +81,7 @@ voicevox-discord/
 | `/join` | ユーザーがいるボイスチャンネルに接続 |
 | `/leave` | ボイスチャンネルから切断 |
 | `/vc` | VCに接続/切断をトグル |
-| `/speaker <engine> <character> [style]` | 読み上げキャラクターを変更（engineで候補を絞り込み、style省略時は先頭スタイル） |
+| `/speaker <character> [style]` | 読み上げキャラクターを変更（characterは `[VOICEVOX] ずんだもん` のようにエンジン名付きで選択） |
 | `/voice` | 音声パラメータを変更（話速・音高・抑揚・音量） |
 | `/skip` | 現在読み上げ中の音声をスキップ |
 | `/mute <user>` | 指定ユーザーの読み上げをミュート |
