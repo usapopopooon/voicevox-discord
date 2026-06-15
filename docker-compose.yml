@@ -8,6 +8,13 @@ services:
       VV_PRESET_FILE: /home/user/.local/share/voicevox-engine/presets.yaml
     volumes:
       - voicevox_user_data:/home/user/.local/share/voicevox-engine
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        mkdir -p /home/user/.local/share/voicevox-engine
+        chown -R user:user /home/user/.local/share/voicevox-engine
+        exec gosu user /opt/voicevox_engine/run --host 0.0.0.0
     deploy:
       resources:
         limits:
