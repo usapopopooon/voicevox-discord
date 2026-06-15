@@ -2224,14 +2224,17 @@ class TestSpeakerCommand:
         bot.characters["[COEIROINK] つくよみちゃん"] = [(10000, "れいせい")]
         bot.speakers_cache[10000] = "[COEIROINK] つくよみちゃん（れいせい）"
         try:
-            with patch.object(
-                bot,
-                "ENGINES",
-                [
-                    ("VOICEVOX", "http://voicevox:50021", 0),
-                    ("COEIROINK", "http://coeiroink:50031", 10000),
-                ],
-            ), patch("bot._refresh_missing_speakers_if_needed", new=AsyncMock()):
+            with (
+                patch.object(
+                    bot,
+                    "ENGINES",
+                    [
+                        ("VOICEVOX", "http://voicevox:50021", 0),
+                        ("COEIROINK", "http://coeiroink:50031", 10000),
+                    ],
+                ),
+                patch("bot._refresh_missing_speakers_if_needed", new=AsyncMock()),
+            ):
                 interaction = _make_interaction(guild_id=621, user_id=622)
                 await speaker.callback(
                     interaction,

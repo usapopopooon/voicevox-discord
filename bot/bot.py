@@ -124,6 +124,7 @@ BOT_CRASH_WINDOW_SECONDS = 300
 BOT_CRASH_THRESHOLD = 5
 BOT_POLL_INTERVAL_SECONDS = 2
 
+
 def _compose_profile_enabled(profile: str) -> bool:
     profiles = re.split(r"[,\s]+", os.getenv("COMPOSE_PROFILES", ""))
     return profile in {item for item in profiles if item}
