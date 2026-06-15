@@ -76,6 +76,7 @@ Coolify の環境変数に以下を追加します。
 
 ```env
 COMPOSE_PROFILES=coeiroink
+# 明示推奨。未設定でも COMPOSE_PROFILES=coeiroink から自動的に同じURLを使います。
 COEIROINK_URL=http://coeiroink:50031
 ```
 

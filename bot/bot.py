@@ -124,18 +124,41 @@ BOT_CRASH_WINDOW_SECONDS = 300
 BOT_CRASH_THRESHOLD = 5
 BOT_POLL_INTERVAL_SECONDS = 2
 
-# 各エンジンの定義（名前, 環境変数, デフォルトURL, IDオフセット）
+def _compose_profile_enabled(profile: str) -> bool:
+    profiles = re.split(r"[,\s]+", os.getenv("COMPOSE_PROFILES", ""))
+    return profile in {item for item in profiles if item}
+
+
+def _engine_url(
+    env_name: str,
+    default: str = "",
+    *,
+    profile: str | None = None,
+    profile_default: str = "",
+) -> str:
+    if url := os.getenv(env_name):
+        return url
+    if profile and _compose_profile_enabled(profile):
+        return profile_default
+    return default
+
+
+# 各エンジンの定義（名前, URL, IDオフセット）
 # IDオフセットでエンジン間のスピーカーID衝突を回避
-_ENGINE_DEFS = [
-    ("VOICEVOX", "VOICEVOX_URL", "http://localhost:50021", 0),
-    ("COEIROINK", "COEIROINK_URL", "", 10000),
-    ("SHAREVOX", "SHAREVOX_URL", "", 20000),
+ENGINES: list[tuple[str, str, int]] = [
+    ("VOICEVOX", _engine_url("VOICEVOX_URL", "http://localhost:50021"), 0),
+    (
+        "COEIROINK",
+        _engine_url(
+            "COEIROINK_URL",
+            profile="coeiroink",
+            profile_default="http://coeiroink:50031",
+        ),
+        10000,
+    ),
+    ("SHAREVOX", _engine_url("SHAREVOX_URL"), 20000),
 ]
-ENGINES: list[tuple[str, str, int]] = [  # (name, url, offset)
-    (name, url, offset)
-    for name, env, default, offset in _ENGINE_DEFS
-    if (url := os.getenv(env, default))
-]
+ENGINES = [(name, url, offset) for name, url, offset in ENGINES if url]
 
 logger.info(f"TTS_ENGINES: {[(n, u) for n, u, _ in ENGINES]}")
 logger.info(f"DEFAULT_SPEAKER_ID: {DEFAULT_SPEAKER}")
