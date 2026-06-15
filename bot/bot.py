@@ -136,10 +136,10 @@ def _engine_url(
     profile: str | None = None,
     profile_default: str = "",
 ) -> str:
-    if url := os.getenv(env_name):
-        return url
     if profile and _compose_profile_enabled(profile):
         return profile_default
+    if url := os.getenv(env_name):
+        return url
     return default
 
 

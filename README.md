@@ -76,8 +76,7 @@ Coolify の環境変数に以下を追加します。
 
 ```env
 COMPOSE_PROFILES=coeiroink
-# 明示推奨。未設定でも COMPOSE_PROFILES=coeiroink から自動的に同じURLを使います。
-COEIROINK_URL=http://coeiroink:50031
+# COMPOSE_PROFILES=coeiroink の場合は http://coeiroink:50031 を自動的に使います。
 ```
 
 `coeiroink` サービスはデフォルトで「つくよみちゃん / れいせい」モデルを同梱してビルドします。モデルzipが約330MBあるため、Coolify 側のディスク空き容量には余裕を持たせてください。別キャラクターや追加スタイルを使う場合は `COEIROINK_META_ZIP_URL` / `COEIROINK_STYLE_ZIP_URLS` / `COEIROINK_SPEAKER_UUID` を build args として上書きします。
