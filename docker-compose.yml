@@ -11,11 +11,26 @@ services:
           memory: 2g
     restart: unless-stopped
 
-  # coeiroink:
-  #   build:
-  #     context: ./engines/coeiroink
-  #     dockerfile: Dockerfile
-  #   restart: unless-stopped
+  coeiroink:
+    profiles:
+      - coeiroink
+    build:
+      context: ./engines/coeiroink
+      dockerfile: Dockerfile
+      args:
+        COEIROINK_ENGINE_REF: ${COEIROINK_ENGINE_REF:-c-1.6.0+v-0.12.3}
+        COEIROINK_SPEAKER_UUID: ${COEIROINK_SPEAKER_UUID:-3c37646f-3881-5374-2a83-149267990abc}
+        COEIROINK_META_ZIP_URL: ${COEIROINK_META_ZIP_URL:-https://www.dropbox.com/scl/fi/2xzh92hf0s4tk7ptltypl/tsukuyomichan-2.0.0.zip?rlkey=sxrzgr3gferkk45o5jzbyvrfy&st=u5d6t01l&dl=1}
+        COEIROINK_STYLE_ZIP_URLS: ${COEIROINK_STYLE_ZIP_URLS:-https://www.dropbox.com/scl/fi/gueh24t2iqwhcouf4y48s/0-1.0.0.zip?rlkey=l0wkgov5x0c2g79o73gmrvjk9&st=dxfgrmgf&dl=1}
+    mem_limit: 4g
+    environment:
+      VV_CPU_NUM_THREADS: "4"
+      VV_OUTPUT_LOG_UTF8: "1"
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    restart: unless-stopped
 
   # sharevox:
   #   build:
@@ -40,9 +55,9 @@ services:
     env_file:
       - .env
     environment:
-      VOICEVOX_URL: http://voicevox:50021
-      # COEIROINK_URL: http://coeiroink:50031
-      # SHAREVOX_URL: http://sharevox:50025
+      VOICEVOX_URL: ${VOICEVOX_URL:-http://voicevox:50021}
+      COEIROINK_URL: ${COEIROINK_URL:-}
+      SHAREVOX_URL: ${SHAREVOX_URL:-}
       DEFAULT_SPEAKER_ID: "46"
       DATABASE_URL: postgresql://bot:bot@postgres:5432/voicevox_bot
     depends_on:

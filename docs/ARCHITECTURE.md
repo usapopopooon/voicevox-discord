@@ -276,6 +276,7 @@ docker compose up
 | **Bot** | `docker-compose.yml` の `discord-bot` サービス。`bot/Dockerfile` でビルド |
 | **PostgreSQL** | `postgres` サービス。`pgdata` ボリュームで永続化 |
 | **VOICEVOX** | `voicevox` サービス。`voicevox/voicevox_engine:cpu-latest` を利用 |
+| **COEIROINK v1** | 任意。`COMPOSE_PROFILES=coeiroink` で有効化し、`engines/coeiroink/Dockerfile` でビルド |
 
 ### Bot の環境変数
 
@@ -283,7 +284,22 @@ docker compose up
 |---|---|
 | `DISCORD_TOKEN` または `DISCORD_TOKENS` | Discord Developer Portal から取得（複数運用は `DISCORD_TOKENS`） |
 | `VOICEVOX_URL` | `http://voicevox:50021` |
+| `COEIROINK_URL` | COEIROINK v1 を使う場合のみ `http://coeiroink:50031` |
 | `DATABASE_URL` | `postgresql://bot:bot@postgres:5432/voicevox_bot` |
+
+### COEIROINK v1 の有効化
+
+Coolify の環境変数に `COMPOSE_PROFILES=coeiroink` と `COEIROINK_URL=http://coeiroink:50031` を設定する。
+`coeiroink` サービスはデフォルトで「つくよみちゃん / れいせい」モデルを同梱する。
+モデルzipは約330MBあり、Python/Torch系依存も重いため、初回ビルドには時間とディスク容量が必要。
+
+追加スタイルや別キャラクターを使う場合は、公式ダウンロードページの `metaDownloadUrl` と各スタイルの `downloadUrl` を使い、以下の build args を上書きする。
+
+| build arg | 説明 |
+|---|---|
+| `COEIROINK_SPEAKER_UUID` | `speaker_info/<uuid>` に使う話者 UUID |
+| `COEIROINK_META_ZIP_URL` | `metas.json` / アイコン / サンプル音声を含む meta zip |
+| `COEIROINK_STYLE_ZIP_URLS` | `config.yaml` と `.pth` を含む style zip URL。複数指定する場合はスペース区切り |
 
 ### デプロイ手順
 

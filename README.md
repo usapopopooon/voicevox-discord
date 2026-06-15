@@ -70,6 +70,17 @@ DISCORD_TOKEN=token1
    - `VOICEVOX_URL` — `http://voicevox:50021`
    - `DATABASE_URL` — `postgresql://bot:bot@postgres:5432/voicevox_bot`
 
+### COEIROINK v1 を使う場合
+
+Coolify の環境変数に以下を追加します。
+
+```env
+COMPOSE_PROFILES=coeiroink
+COEIROINK_URL=http://coeiroink:50031
+```
+
+`coeiroink` サービスはデフォルトで「つくよみちゃん / れいせい」モデルを同梱してビルドします。モデルzipが約330MBあるため、Coolify 側のディスク空き容量には余裕を持たせてください。別キャラクターや追加スタイルを使う場合は `COEIROINK_META_ZIP_URL` / `COEIROINK_STYLE_ZIP_URLS` / `COEIROINK_SPEAKER_UUID` を build args として上書きします。
+
 ## 技術スタック
 
 - Python 3.12 / discord.py (voice)

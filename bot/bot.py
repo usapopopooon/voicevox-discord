@@ -116,6 +116,7 @@ TTS_AUDIO_QUERY_TIMEOUT_SECONDS = float(
     os.getenv("TTS_AUDIO_QUERY_TIMEOUT_SECONDS", "3")
 )
 TTS_SYNTHESIS_TIMEOUT_SECONDS = float(os.getenv("TTS_SYNTHESIS_TIMEOUT_SECONDS", "8"))
+TTS_SPEAKERS_TIMEOUT_SECONDS = float(os.getenv("TTS_SPEAKERS_TIMEOUT_SECONDS", "3"))
 
 # 子プロセスの自動再起動（指数バックオフ + クラッシュループ検出）
 BOT_RESTART_BACKOFF_MAX_SECONDS = 60
@@ -385,6 +386,7 @@ speaker_engine: dict[int, tuple[str, int]] = {}
 characters: dict[str, list[tuple[int, str]]] = {}
 guild_dicts: dict[int, dict[str, str]] = {}
 guild_mutes: dict[int, set[int]] = {}  # guild_id -> set of muted user_ids
+_speaker_fetch_success_engines: set[str] = set()
 
 # テキスト前処理用の正規表現（1パスで URL / メール / カスタム絵文字を置換）
 _CLEAN_TEXT_PATTERN = re.compile(
@@ -1871,11 +1873,15 @@ async def fetch_speakers():
     speakers_cache.clear()
     speaker_engine.clear()
     characters.clear()
+    _speaker_fetch_success_engines.clear()
 
     session = await get_http_session()
     for engine_name, engine_url, offset in ENGINES:
         try:
-            async with session.get(f"{engine_url}/speakers") as resp:
+            async with session.get(
+                f"{engine_url}/speakers",
+                timeout=aiohttp.ClientTimeout(total=TTS_SPEAKERS_TIMEOUT_SECONDS),
+            ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
 
@@ -1901,6 +1907,7 @@ async def fetch_speakers():
                     characters[char_key].append((global_id, style_name))
                     count += 1
 
+            _speaker_fetch_success_engines.add(engine_name)
             logger.info(f"スピーカー取得成功: {engine_name} ({count}件)")
         except Exception as e:
             logger.warning(f"スピーカー取得失敗: {engine_name}: {e}")
@@ -1908,8 +1915,13 @@ async def fetch_speakers():
     logger.info(f"スピーカー一覧合計: {len(speakers_cache)}件")
 
 
+def _has_missing_configured_speaker_engines() -> bool:
+    configured = {name for name, _, _ in ENGINES}
+    return bool(configured) and not configured.issubset(_speaker_fetch_success_engines)
+
+
 async def _refresh_speakers_if_needed() -> None:
-    """speaker_engine が空のときにスピーカー一覧を再取得する（短時間の連打を抑制）。"""
+    """スピーカー一覧を再取得する（短時間の連打を抑制）。"""
     global _last_speaker_refresh_attempt
 
     now = time.monotonic()
@@ -1925,6 +1937,18 @@ async def _refresh_speakers_if_needed() -> None:
         # SPEAKER_REFRESH_INTERVAL 秒ごとの再試行に抑え、スパムを防ぐ。
         _last_speaker_refresh_attempt = now
         await fetch_speakers()
+
+
+async def _refresh_missing_speakers_if_needed() -> None:
+    """起動が遅れた任意エンジンがあれば、スピーカー一覧を再取得する。"""
+    if _has_missing_configured_speaker_engines():
+        await _refresh_speakers_if_needed()
+
+
+def _schedule_missing_speaker_refresh() -> None:
+    """autocomplete を待たせないため、不足エンジンの再取得を裏で走らせる。"""
+    if _has_missing_configured_speaker_engines():
+        _spawn_background(_refresh_speakers_if_needed())
 
 
 @dataclass(frozen=True)
@@ -2823,6 +2847,11 @@ async def speaker(
     if guild is None:
         return
 
+    if not characters and not speaker_engine:
+        await _refresh_speakers_if_needed()
+    elif characters:
+        await _refresh_missing_speakers_if_needed()
+
     if not characters:
         await interaction.response.send_message(
             "スピーカー情報がまだ読み込まれていません"
@@ -2883,6 +2912,11 @@ async def speaker(
 async def speaker_char_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
+    if not characters and not speaker_engine:
+        _spawn_background(_refresh_speakers_if_needed())
+    elif characters:
+        _schedule_missing_speaker_refresh()
+
     if not characters:
         return []
     choices = []
@@ -2898,6 +2932,9 @@ async def speaker_char_autocomplete(
 async def speaker_style_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
+    if characters:
+        _schedule_missing_speaker_refresh()
+
     # 入力中のcharacterオプションを取得
     char_input = None
     data = interaction.data if isinstance(interaction.data, dict) else {}
