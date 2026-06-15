@@ -23,7 +23,7 @@ Discord のテキストチャンネルのメッセージを VOICEVOX の音声�
 | `/join` | ボイスチャンネルに接続 |
 | `/leave` | ボイスチャンネルから切断 |
 | `/vc` | 接続/切断をトグル |
-| `/speaker <character> [style]` | 読み上げキャラクターを変更（style 省略時: ノーマル） |
+| `/speaker <engine> <character> [style]` | 読み上げキャラクターを変更（style 省略時: 先頭のスタイル） |
 | `/voice` | 話速・音高・抑揚・音量を変更 |
 | `/skip` | 現在の読み上げをスキップ |
 | `/dict` | 読み上げ辞書の設定 |
@@ -102,4 +102,9 @@ COMPOSE_PROFILES=coeiroink
 
 ## クレジット
 
-> VOICEVOX:ずんだもん
+音声利用時は、各ボイスの利用規約に従ってクレジット表記してください。
+
+各ボイスおよびライセンスはこちら:
+
+- VOICEVOX: https://voicevox.hiroshiba.jp/
+- COEIROINK: https://coeiroink.com/

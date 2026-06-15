@@ -1446,6 +1446,24 @@ class TestSynthesizeFallback:
         finally:
             bot.speaker_engine.pop(10003, None)
 
+    async def test_user_setting_global_id_keeps_engine_route(self):
+        import bot
+
+        original_map = dict(bot.speaker_engine)
+        try:
+            bot.speaker_engine.clear()
+            bot.speaker_engine[10000] = ("http://coeiroink:50031", 0)
+            bot.speaker_engine[46] = ("http://voicevox:50021", 46)
+
+            candidates = await bot._build_synthesis_candidates(10000)
+
+            assert candidates[0].engine_url == "http://coeiroink:50031"
+            assert candidates[0].real_id == 0
+            assert candidates[0].reason == "requested_speaker"
+        finally:
+            bot.speaker_engine.clear()
+            bot.speaker_engine.update(original_map)
+
     async def test_refreshes_speakers_when_cache_empty(self):
         import bot
         from bot import VoiceSettings, synthesize
@@ -2110,7 +2128,9 @@ class TestSpeakerCommand:
         bot.characters.clear()
         try:
             interaction = _make_interaction()
-            await speaker.callback(interaction, character="ずんだもん")
+            await speaker.callback(
+                interaction, engine="VOICEVOX", character="ずんだもん"
+            )
             interaction.response.send_message.assert_awaited_once_with(
                 "スピーカー情報がまだ読み込まれていません"
             )
@@ -2124,7 +2144,10 @@ class TestSpeakerCommand:
         bot.characters["ずんだもん"] = [(3, "ノーマル")]
         try:
             interaction = _make_interaction()
-            await speaker.callback(interaction, character="存在しないキャラ")
+            with patch("bot._refresh_missing_speakers_if_needed", new=AsyncMock()):
+                await speaker.callback(
+                    interaction, engine="VOICEVOX", character="存在しないキャラ"
+                )
             msg = interaction.response.send_message.await_args.args[0]
             assert "見つかりません" in msg
         finally:
@@ -2137,9 +2160,13 @@ class TestSpeakerCommand:
         bot.characters["ずんだもん"] = [(3, "ノーマル"), (1, "あまあま")]
         try:
             interaction = _make_interaction()
-            await speaker.callback(
-                interaction, character="ずんだもん", style="ありえないスタイル"
-            )
+            with patch("bot._refresh_missing_speakers_if_needed", new=AsyncMock()):
+                await speaker.callback(
+                    interaction,
+                    engine="VOICEVOX",
+                    character="ずんだもん",
+                    style="ありえないスタイル",
+                )
             msg = interaction.response.send_message.await_args.args[0]
             assert "スタイル" in msg and "ありません" in msg
         finally:
@@ -2153,9 +2180,13 @@ class TestSpeakerCommand:
         bot.speakers_cache[1] = "ずんだもん（あまあま）"
         try:
             interaction = _make_interaction(guild_id=601, user_id=602)
-            await speaker.callback(
-                interaction, character="ずんだもん", style="あまあま"
-            )
+            with patch("bot._refresh_missing_speakers_if_needed", new=AsyncMock()):
+                await speaker.callback(
+                    interaction,
+                    engine="VOICEVOX",
+                    character="ずんだもん",
+                    style="あまあま",
+                )
             assert bot.user_settings[(601, 602)].speaker_id == 1
         finally:
             bot.user_settings.pop((601, 602), None)
@@ -2174,13 +2205,45 @@ class TestSpeakerCommand:
         bot.speakers_cache[99] = "ずんだ（ノーマル）"
         try:
             interaction = _make_interaction(guild_id=611, user_id=612)
-            await speaker.callback(interaction, character="ずんだ")
+            with patch("bot._refresh_missing_speakers_if_needed", new=AsyncMock()):
+                await speaker.callback(
+                    interaction, engine="VOICEVOX", character="ずんだ"
+                )
             assert bot.user_settings[(611, 612)].speaker_id == 99
         finally:
             bot.user_settings.pop((611, 612), None)
             bot.characters.pop("ずんだもん", None)
             bot.characters.pop("ずんだ", None)
             bot.speakers_cache.pop(99, None)
+
+    async def test_speaker_change_persists_engine_by_global_id(self, mock_db_pool):
+        import bot
+        from bot import speaker
+
+        bot.characters["[VOICEVOX] ずんだもん"] = [(3, "ノーマル")]
+        bot.characters["[COEIROINK] つくよみちゃん"] = [(10000, "れいせい")]
+        bot.speakers_cache[10000] = "[COEIROINK] つくよみちゃん（れいせい）"
+        try:
+            with patch.object(
+                bot,
+                "ENGINES",
+                [
+                    ("VOICEVOX", "http://voicevox:50021", 0),
+                    ("COEIROINK", "http://coeiroink:50031", 10000),
+                ],
+            ), patch("bot._refresh_missing_speakers_if_needed", new=AsyncMock()):
+                interaction = _make_interaction(guild_id=621, user_id=622)
+                await speaker.callback(
+                    interaction,
+                    engine="COEIROINK",
+                    character="つくよみちゃん",
+                )
+            assert bot.user_settings[(621, 622)].speaker_id == 10000
+        finally:
+            bot.user_settings.pop((621, 622), None)
+            bot.characters.pop("[VOICEVOX] ずんだもん", None)
+            bot.characters.pop("[COEIROINK] つくよみちゃん", None)
+            bot.speakers_cache.pop(10000, None)
 
 
 def _make_message(guild_id=111, channel_id=888, user_id=222, content="テスト"):
@@ -3085,6 +3148,13 @@ class TestJoinCommand:
 
 
 class TestSpeakerAutocomplete:
+    async def test_engine_autocomplete_returns_configured_engines(self):
+        from bot import speaker_engine_autocomplete
+
+        result = await speaker_engine_autocomplete(MagicMock(), "")
+        names = [c.name for c in result]
+        assert "VOICEVOX" in names
+
     async def test_character_autocomplete_empty(self):
         import bot
         from bot import speaker_char_autocomplete
@@ -3104,7 +3174,9 @@ class TestSpeakerAutocomplete:
         bot.characters["ずんだもん"] = [(3, "ノーマル")]
         bot.characters["四国めたん"] = [(2, "ノーマル")]
         try:
-            result = await speaker_char_autocomplete(MagicMock(), "ずんだ")
+            interaction = MagicMock()
+            interaction.data = {"options": [{"name": "engine", "value": "VOICEVOX"}]}
+            result = await speaker_char_autocomplete(interaction, "ずんだ")
             names = [c.name for c in result]
             assert "ずんだもん" in names
             assert "四国めたん" not in names
@@ -3119,12 +3191,40 @@ class TestSpeakerAutocomplete:
         bot.characters["A"] = [(1, "x")]
         bot.characters["B"] = [(2, "y")]
         try:
-            result = await speaker_char_autocomplete(MagicMock(), "")
+            interaction = MagicMock()
+            interaction.data = {"options": [{"name": "engine", "value": "VOICEVOX"}]}
+            result = await speaker_char_autocomplete(interaction, "")
             names = [c.name for c in result]
             assert set(names) == {"A", "B"}
         finally:
             bot.characters.pop("A", None)
             bot.characters.pop("B", None)
+
+    async def test_character_autocomplete_filters_by_engine(self):
+        import bot
+        from bot import speaker_char_autocomplete
+
+        bot.characters["[VOICEVOX] ずんだもん"] = [(3, "ノーマル")]
+        bot.characters["[COEIROINK] つくよみちゃん"] = [(10000, "れいせい")]
+        try:
+            with patch.object(
+                bot,
+                "ENGINES",
+                [
+                    ("VOICEVOX", "http://voicevox:50021", 0),
+                    ("COEIROINK", "http://coeiroink:50031", 10000),
+                ],
+            ):
+                interaction = MagicMock()
+                interaction.data = {
+                    "options": [{"name": "engine", "value": "COEIROINK"}]
+                }
+                result = await speaker_char_autocomplete(interaction, "")
+            names = [c.name for c in result]
+            assert names == ["つくよみちゃん"]
+        finally:
+            bot.characters.pop("[VOICEVOX] ずんだもん", None)
+            bot.characters.pop("[COEIROINK] つくよみちゃん", None)
 
     async def test_style_autocomplete_handles_missing_interaction_data(self):
         from bot import speaker_style_autocomplete
@@ -3154,7 +3254,10 @@ class TestSpeakerAutocomplete:
         try:
             interaction = MagicMock()
             interaction.data = {
-                "options": [{"name": "character", "value": "ずんだもん"}]
+                "options": [
+                    {"name": "engine", "value": "VOICEVOX"},
+                    {"name": "character", "value": "ずんだもん"},
+                ]
             }
             result = await speaker_style_autocomplete(interaction, "あま")
             names = [c.name for c in result]
@@ -3171,7 +3274,10 @@ class TestSpeakerAutocomplete:
         try:
             interaction = MagicMock()
             interaction.data = {
-                "options": [{"name": "character", "value": "存在しない"}]
+                "options": [
+                    {"name": "engine", "value": "VOICEVOX"},
+                    {"name": "character", "value": "存在しない"},
+                ]
             }
             result = await speaker_style_autocomplete(interaction, "")
             assert result == []
@@ -5058,11 +5164,16 @@ class TestHelpCommand:
         embed = _build_help_embed()
         assert embed.title == "読み上げBot — コマンド一覧"
 
-    def test_help_embed_contains_voicevox_url_and_label(self):
-        from bot import _VOICEVOX_OFFICIAL_URL, _build_help_embed
+    def test_help_embed_contains_voice_license_urls_and_label(self):
+        from bot import (
+            _COEIROINK_OFFICIAL_URL,
+            _VOICEVOX_OFFICIAL_URL,
+            _build_help_embed,
+        )
 
         description = _build_help_embed().description or ""
         assert _VOICEVOX_OFFICIAL_URL in description
+        assert _COEIROINK_OFFICIAL_URL in description
         # 「各ボイスおよびライセンスはこちら」など、URL の文脈も併記されている
         assert "ライセンス" in description
 
@@ -5115,8 +5226,8 @@ class TestHelpCommand:
         await help_cmd.callback(interaction)
         interaction.response.send_message.assert_awaited_once()
 
-    async def test_help_command_sends_embed_with_url(self):
-        from bot import _VOICEVOX_OFFICIAL_URL, help_cmd
+    async def test_help_command_sends_embed_with_urls(self):
+        from bot import _COEIROINK_OFFICIAL_URL, _VOICEVOX_OFFICIAL_URL, help_cmd
 
         interaction = _make_interaction()
         await help_cmd.callback(interaction)
@@ -5127,6 +5238,7 @@ class TestHelpCommand:
         assert embed is not None
         assert isinstance(embed, discord.Embed)
         assert _VOICEVOX_OFFICIAL_URL in (embed.description or "")
+        assert _COEIROINK_OFFICIAL_URL in (embed.description or "")
 
     async def test_help_command_uses_no_prefix(self):
         """/help は接続メッセージを含まない（純粋なコマンド一覧）"""

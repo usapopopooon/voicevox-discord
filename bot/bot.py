@@ -2467,6 +2467,7 @@ async def on_guild_remove(guild: discord.Guild):
 
 
 _VOICEVOX_OFFICIAL_URL = "https://voicevox.hiroshiba.jp/"
+_COEIROINK_OFFICIAL_URL = "https://coeiroink.com/"
 
 
 def _attachment_category(content_type: str | None) -> str:
@@ -2524,14 +2525,16 @@ def _build_help_embed(prefix: str | None = None) -> discord.Embed:
         "`/join` — VCに接続\n"
         "`/leave` — VCから切断\n"
         "`/skip` — 読み上げをスキップ\n"
-        "`/speaker` — キャラクター変更\n"
+        "`/speaker` — 音声エンジン・キャラクター変更\n"
         "`/voice` — 話速・音高・抑揚・音量\n"
         "`/dict` — 読み上げ辞書の管理\n"
         "`/mute` — ユーザーをミュート\n"
         "`/unmute` — ミュート解除\n"
         "`/showmute` — ミュート一覧\n"
         "`/help` — このヘルプを表示\n\n"
-        f"各ボイスおよびライセンスはこちら: {_VOICEVOX_OFFICIAL_URL}"
+        "各ボイスおよびライセンスはこちら:\n"
+        f"VOICEVOX: {_VOICEVOX_OFFICIAL_URL}\n"
+        f"COEIROINK: {_COEIROINK_OFFICIAL_URL}"
     )
     description = f"{prefix}\n\n{body}" if prefix else body
     return discord.Embed(
@@ -2858,13 +2861,15 @@ async def showmute_cmd(interaction: discord.Interaction):
 
 @tree.command(name="speaker", description="自分の読み上げキャラクターを変更")
 @app_commands.describe(
+    engine="音声エンジン（例: VOICEVOX / COEIROINK）",
     character="キャラクター名（例: ずんだもん）",
-    style="スタイル名（省略時: ノーマル）",
+    style="スタイル名（省略時: 先頭のスタイル）",
 )
 async def speaker(
     interaction: discord.Interaction,
+    engine: str,
     character: str,
-    style: str = "ノーマル",
+    style: str | None = None,
 ):
     guild = await _require_guild_interaction(interaction)
     if guild is None:
@@ -2881,37 +2886,32 @@ async def speaker(
         )
         return
 
+    matched_engine = _match_speaker_engine(engine)
+    if not matched_engine:
+        await interaction.response.send_message(
+            f"「{engine}」に一致する音声エンジンが見つかりません\n"
+            f"利用可能: {', '.join(_configured_speaker_engines())}"
+        )
+        return
+
     # キャラクター名で検索（完全一致優先、無ければ最初の部分一致）
-    matched_char = None
-    query = character.lower()
-    for char_name in characters:
-        if query == char_name.lower():
-            matched_char = char_name
-            break
-        if matched_char is None and query in char_name.lower():
-            matched_char = char_name
+    matched_char = _match_speaker_character(matched_engine, character)
 
     if not matched_char:
         await interaction.response.send_message(
-            f"「{character}」に一致するキャラクターが見つかりません"
+            f"「{matched_engine}」にキャラクター「{character}」が見つかりません"
         )
         return
 
     # スタイル名で検索（完全一致優先、無ければ最初の部分一致）
     styles = characters[matched_char]
-    matched_style = None
-    style_query = style.lower()
-    for global_id, style_name in styles:
-        if style_query == style_name.lower():
-            matched_style = (global_id, style_name)
-            break
-        if matched_style is None and style_query in style_name.lower():
-            matched_style = (global_id, style_name)
+    matched_style = _match_speaker_style(styles, style)
 
     if not matched_style:
         style_names = ", ".join(s[1] for s in styles)
         await interaction.response.send_message(
-            f"「{matched_char}」にスタイル「{style}」がありません\n"
+            f"「{_speaker_character_display_name(matched_char)}」に"
+            f"スタイル「{style}」がありません\n"
             f"利用可能: {style_names}"
         )
         return
@@ -2931,6 +2931,108 @@ async def speaker(
     await interaction.response.send_message(f"キャラクターを「{name}」に変更しました")
 
 
+def _configured_speaker_engines() -> list[str]:
+    return [name for name, _, _ in ENGINES]
+
+
+def _match_speaker_engine(engine: str) -> str | None:
+    query = engine.strip().lower()
+    if not query:
+        return None
+
+    partial = None
+    for engine_name in _configured_speaker_engines():
+        lowered = engine_name.lower()
+        if query == lowered:
+            return engine_name
+        if partial is None and query in lowered:
+            partial = engine_name
+    return partial
+
+
+def _speaker_character_engine(char_name: str) -> str | None:
+    for engine_name in _configured_speaker_engines():
+        prefix = f"[{engine_name}] "
+        if char_name.startswith(prefix):
+            return engine_name
+    engines = _configured_speaker_engines()
+    return engines[0] if len(engines) == 1 else None
+
+
+def _speaker_character_display_name(char_name: str) -> str:
+    for engine_name in _configured_speaker_engines():
+        prefix = f"[{engine_name}] "
+        if char_name.startswith(prefix):
+            return char_name.removeprefix(prefix)
+    return char_name
+
+
+def _speaker_characters_for_engine(engine: str) -> list[tuple[str, str]]:
+    return [
+        (char_name, _speaker_character_display_name(char_name))
+        for char_name in characters
+        if _speaker_character_engine(char_name) == engine
+    ]
+
+
+def _match_speaker_character(engine: str, character: str) -> str | None:
+    query = character.strip().lower()
+    if not query:
+        return None
+
+    partial = None
+    for char_name, display_name in _speaker_characters_for_engine(engine):
+        lowered_key = char_name.lower()
+        lowered_display = display_name.lower()
+        if query in {lowered_key, lowered_display}:
+            return char_name
+        if partial is None and (query in lowered_key or query in lowered_display):
+            partial = char_name
+    return partial
+
+
+def _match_speaker_style(
+    styles: list[tuple[int, str]], style: str | None
+) -> tuple[int, str] | None:
+    if not styles:
+        return None
+    if style is None or not style.strip():
+        return styles[0]
+
+    partial = None
+    style_query = style.lower()
+    for global_id, style_name in styles:
+        if style_query == style_name.lower():
+            return (global_id, style_name)
+        if partial is None and style_query in style_name.lower():
+            partial = (global_id, style_name)
+    return partial
+
+
+def _interaction_option_value(
+    interaction: discord.Interaction, option_name: str
+) -> str | None:
+    data = interaction.data if isinstance(interaction.data, dict) else {}
+    for opt in data.get("options", []):
+        if opt.get("name") == option_name:
+            value = opt.get("value", "")
+            return value if isinstance(value, str) else str(value)
+    return None
+
+
+@speaker.autocomplete("engine")
+async def speaker_engine_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    _ = interaction
+    query = current.lower()
+    return [
+        app_commands.Choice(name=engine_name, value=engine_name)
+        for engine_name in _configured_speaker_engines()
+        if current == "" or query in engine_name.lower()
+    ][:25]
+
+
 @speaker.autocomplete("character")
 async def speaker_char_autocomplete(
     interaction: discord.Interaction, current: str
@@ -2942,10 +3044,20 @@ async def speaker_char_autocomplete(
 
     if not characters:
         return []
+
+    engine_input = _interaction_option_value(interaction, "engine")
+    if not engine_input:
+        return []
+
+    matched_engine = _match_speaker_engine(engine_input)
+    if not matched_engine:
+        return []
+
+    query = current.lower()
     choices = []
-    for char_name in characters:
-        if current == "" or current.lower() in char_name.lower():
-            choices.append(app_commands.Choice(name=char_name, value=char_name))
+    for _, display_name in _speaker_characters_for_engine(matched_engine):
+        if current == "" or query in display_name.lower():
+            choices.append(app_commands.Choice(name=display_name, value=display_name))
             if len(choices) >= 25:
                 break
     return choices
@@ -2958,26 +3070,18 @@ async def speaker_style_autocomplete(
     if characters:
         _schedule_missing_speaker_refresh()
 
-    # 入力中のcharacterオプションを取得
-    char_input = None
-    data = interaction.data if isinstance(interaction.data, dict) else {}
-    for opt in data.get("options", []):
-        if opt["name"] == "character":
-            value = opt.get("value", "")
-            char_input = value if isinstance(value, str) else str(value)
-            break
+    engine_input = _interaction_option_value(interaction, "engine")
+    matched_engine = _match_speaker_engine(engine_input or "")
+    if not matched_engine:
+        return []
+
+    char_input = _interaction_option_value(interaction, "character")
 
     if not char_input or not characters:
         return []
 
     # キャラクター名でマッチ
-    matched_char = None
-    for char_name in characters:
-        if char_input.lower() in char_name.lower():
-            matched_char = char_name
-            if char_input.lower() == char_name.lower():
-                break
-
+    matched_char = _match_speaker_character(matched_engine, char_input)
     if not matched_char:
         return []
 

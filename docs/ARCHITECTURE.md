@@ -81,7 +81,7 @@ voicevox-discord/
 | `/join` | ユーザーがいるボイスチャンネルに接続 |
 | `/leave` | ボイスチャンネルから切断 |
 | `/vc` | VCに接続/切断をトグル |
-| `/speaker <character> [style]` | 読み上げキャラクターを変更（style省略時: ノーマル、オートコンプリート対応） |
+| `/speaker <engine> <character> [style]` | 読み上げキャラクターを変更（engineで候補を絞り込み、style省略時は先頭スタイル） |
 | `/voice` | 音声パラメータを変更（話速・音高・抑揚・音量） |
 | `/skip` | 現在読み上げ中の音声をスキップ |
 | `/mute <user>` | 指定ユーザーの読み上げをミュート |
@@ -311,6 +311,9 @@ Coolify の環境変数に `COMPOSE_PROFILES=coeiroink` と `COEIROINK_URL=http:
 
 ## クレジット
 
-VOICEVOX で生成した音声を利用する場合、利用規約によりクレジット表記が必要。
+音声を利用する場合、各ボイスの利用規約に従ってクレジット表記が必要。
 
-> 「VOICEVOX:ずんだもん」
+各ボイスおよびライセンスはこちら:
+
+- VOICEVOX: https://voicevox.hiroshiba.jp/
+- COEIROINK: https://coeiroink.com/
