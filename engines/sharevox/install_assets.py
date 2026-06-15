@@ -48,15 +48,59 @@ def _manifest_payload() -> dict[str, str]:
 
 
 def _required_assets_exist(data_dir: Path) -> bool:
-    checks = [
-        data_dir / "speaker_info",
-        data_dir / "core",
-        data_dir / "onnxruntime" / "lib",
-        data_dir / "model" / "libraries.json",
-        data_dir / "engine" / "engine_manifest.json",
-        data_dir / "engine" / "engine_manifest_assets",
-    ]
-    return all(path.exists() for path in checks)
+    return (
+        _resource_complete(data_dir)
+        and _core_complete(data_dir)
+        and _onnxruntime_complete(data_dir)
+        and _model_complete(data_dir)
+    )
+
+
+def _resource_complete(data_dir: Path) -> bool:
+    manifest_assets = data_dir / "engine" / "engine_manifest_assets"
+    return (
+        any((data_dir / "speaker_info").glob("*/metas.json"))
+        and (data_dir / "engine" / "engine_manifest.json").exists()
+        and (manifest_assets / "update_infos.json").exists()
+    )
+
+
+def _core_complete(data_dir: Path) -> bool:
+    return (
+        (data_dir / "core" / "libsharevox_core.so").exists()
+        and (data_dir / "core" / "VERSION").exists()
+    )
+
+
+def _onnxruntime_complete(data_dir: Path) -> bool:
+    return (
+        (data_dir / "onnxruntime" / "lib" / "libonnxruntime.so").exists()
+        and (data_dir / "onnxruntime" / "VERSION_NUMBER").exists()
+    )
+
+
+def _model_complete(data_dir: Path) -> bool:
+    model_dir = data_dir / "model"
+    libraries_path = model_dir / "libraries.json"
+    if not libraries_path.exists():
+        return False
+    try:
+        libraries = json.loads(libraries_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(libraries, dict):
+        return False
+
+    enabled_libraries = [name for name, enabled in libraries.items() if enabled]
+    if not enabled_libraries:
+        return False
+
+    return all(
+        (model_dir / name / "metas.json").exists()
+        and (model_dir / name / "model_config.json").exists()
+        and any((model_dir / name).glob("*.onnx"))
+        for name in enabled_libraries
+    )
 
 
 def _manifest_matches(manifest_path: Path, payload: dict[str, str]) -> bool:
@@ -78,6 +122,14 @@ def _clean_directory(path: Path) -> None:
             shutil.rmtree(child)
         else:
             child.unlink()
+
+
+def _remove_path(path: Path) -> None:
+    if path.exists() or path.is_symlink():
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
 
 
 def _copytree_contents(src: Path, dest: Path) -> None:
@@ -148,23 +200,22 @@ def _write_engine_version(engine_root: Path, version: str) -> None:
 def _ensure_openjtalk_dict() -> None:
     raw_dir = pyopenjtalk.OPEN_JTALK_DICT_DIR
     dict_dir = Path(raw_dir.decode("utf-8") if isinstance(raw_dir, bytes) else raw_dir)
-    if (dict_dir / "sys.dic").exists():
+    required = ("char.bin", "matrix.bin", "sys.dic", "unk.dic")
+    if all((dict_dir / name).exists() for name in required):
         print(f"OpenJTalk dictionary already exists in {dict_dir}")
         return
 
+    if dict_dir.exists():
+        _clean_directory(dict_dir)
     dict_dir.mkdir(parents=True, exist_ok=True)
     print(f"Installing OpenJTalk dictionary into {dict_dir}")
     pyopenjtalk._extract_dic()
-    if not (dict_dir / "sys.dic").exists():
+    if not all((dict_dir / name).exists() for name in required):
         raise RuntimeError(f"OpenJTalk dictionary install failed: {dict_dir}")
 
 
 def _install_resource(tmp: Path, data_dir: Path, payload: dict[str, str]) -> None:
-    if (
-        (data_dir / "speaker_info").exists()
-        and (data_dir / "engine" / "engine_manifest.json").exists()
-        and (data_dir / "engine" / "engine_manifest_assets").exists()
-    ):
+    if _resource_complete(data_dir):
         print("Skipping installed SHAREVOX resource")
         return
 
@@ -212,7 +263,7 @@ def _install_resource(tmp: Path, data_dir: Path, payload: dict[str, str]) -> Non
 
 def _install_core(tmp: Path, data_dir: Path, payload: dict[str, str]) -> None:
     core_dir = data_dir / "core"
-    if core_dir.exists() and any(core_dir.iterdir()):
+    if _core_complete(data_dir):
         print("Skipping installed SHAREVOX core")
         return
     if core_dir.exists():
@@ -235,7 +286,7 @@ def _install_core(tmp: Path, data_dir: Path, payload: dict[str, str]) -> None:
 
 def _install_onnxruntime(tmp: Path, data_dir: Path, payload: dict[str, str]) -> None:
     runtime_dir = data_dir / "onnxruntime"
-    if (runtime_dir / "lib").exists():
+    if _onnxruntime_complete(data_dir):
         print("Skipping installed ONNX Runtime")
         return
     if runtime_dir.exists():
@@ -259,7 +310,7 @@ def _install_onnxruntime(tmp: Path, data_dir: Path, payload: dict[str, str]) -> 
 
 def _install_model(tmp: Path, data_dir: Path, payload: dict[str, str]) -> None:
     model_dir = data_dir / "model"
-    if (model_dir / "libraries.json").exists():
+    if _model_complete(data_dir):
         print("Skipping installed SHAREVOX model")
         return
     if model_dir.exists():
@@ -284,11 +335,7 @@ def _install_model(tmp: Path, data_dir: Path, payload: dict[str, str]) -> None:
 def _replace_with_symlink(link_path: Path, target: Path) -> None:
     if link_path.is_symlink() and link_path.resolve() == target.resolve():
         return
-    if link_path.exists() or link_path.is_symlink():
-        if link_path.is_dir() and not link_path.is_symlink():
-            shutil.rmtree(link_path)
-        else:
-            link_path.unlink()
+    _remove_path(link_path)
     link_path.symlink_to(target, target_is_directory=target.is_dir())
 
 

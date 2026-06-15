@@ -137,7 +137,7 @@ def _find_style_dir(root: Path, style_id: str) -> Path:
 
 
 def _style_installed(style_dir: Path) -> bool:
-    return (style_dir / "config.yaml").exists()
+    return (style_dir / "config.yaml").exists() and any(style_dir.rglob("*.pth"))
 
 
 def _filter_meta_styles(speaker_dir: Path) -> int:
