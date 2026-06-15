@@ -9,7 +9,7 @@ Discord のテキストチャンネルに投稿されたメッセージを、VOI
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  Railway / Docker Compose                        │
+│  Coolify / Docker Compose                        │
 │                                                  │
 │  ┌──────────────┐    ┌───────────────────────┐   │
 │  │ discord-bot  │───→│ voicevox              │   │
@@ -40,9 +40,8 @@ voicevox-discord/
 │   ├── kaomoji_builtin.py    ← built-in 顔文字辞書
 │   ├── migrate.py            ← マイグレーションランナー
 │   ├── migrations/           ← 逐次適用される DB マイグレーション
-│   ├── Dockerfile            ← 本番用 (Railway)
+│   ├── Dockerfile            ← 本番用
 │   ├── Dockerfile.dev        ← 開発用 (watchdog ホットリロード)
-│   ├── railway.toml          ← Railway サービス設定
 │   ├── requirements.txt      ← 本番依存
 │   ├── requirements.dev.txt  ← 開発追加依存
 │   └── tests/
@@ -71,7 +70,7 @@ voicevox-discord/
 | 音声合成 | VOICEVOX Engine (CPU版, Docker) |
 | HTTP クライアント | aiohttp |
 | DB | PostgreSQL + asyncpg |
-| コンテナ | Docker Compose (ローカル) / Railway (本番) |
+| コンテナ | Docker Compose (ローカル / Coolify 本番) |
 | CI | GitHub Actions (ruff + pytest) |
 | ホットリロード | watchdog (watchmedo) |
 
@@ -268,32 +267,31 @@ docker compose up
 - `docker-compose.override.yml` が自動マージされ、ホットリロード・ポート公開が有効になる
 - VOICEVOX: `localhost:50021`、PostgreSQL: `localhost:5432` でアクセス可能
 
-## Railway デプロイ
+## Coolify デプロイ
 
 ### サービス構成
 
 | サービス | 設定 |
 |---|---|
-| **Bot** | Source: GitHub リポジトリ、Root Directory: `bot/`、Dockerfile ビルド |
-| **PostgreSQL** | Railway プラグインとして追加。`DATABASE_URL` が Bot に自動注入される |
-| **VOICEVOX** | Docker Image: `voicevox/voicevox_engine:cpu-latest` として追加 |
+| **Bot** | `docker-compose.yml` の `discord-bot` サービス。`bot/Dockerfile` でビルド |
+| **PostgreSQL** | `postgres` サービス。`pgdata` ボリュームで永続化 |
+| **VOICEVOX** | `voicevox` サービス。`voicevox/voicevox_engine:cpu-latest` を利用 |
 
-### Bot の環境変数 (Railway Variables)
+### Bot の環境変数
 
 | 変数 | 値 |
 |---|---|
 | `DISCORD_TOKEN` または `DISCORD_TOKENS` | Discord Developer Portal から取得（複数運用は `DISCORD_TOKENS`） |
-| `VOICEVOX_URL` | `http://voicevox.railway.internal:50021` |
-| `DATABASE_URL` | PostgreSQL プラグインから自動注入 |
+| `VOICEVOX_URL` | `http://voicevox:50021` |
+| `DATABASE_URL` | `postgresql://bot:bot@postgres:5432/voicevox_bot` |
 
 ### デプロイ手順
 
-1. Railway で新規プロジェクト作成
-2. PostgreSQL プラグインを追加
-3. VOICEVOX サービスを追加（Docker Image: `voicevox/voicevox_engine:cpu-latest`）
-4. Bot サービスを追加（GitHub リポジトリ連携、Root Directory: `bot/`）
-5. Bot の環境変数に `DISCORD_TOKEN` または `DISCORD_TOKENS` と `VOICEVOX_URL` を設定
-6. デプロイ（`DATABASE_URL` は PostgreSQL プラグインから自動注入）
+1. Coolify で GitHub リポジトリを Docker Compose アプリとして作成
+2. `docker-compose.yml` を指定してサービスを作成
+3. Bot の環境変数に `DISCORD_TOKEN` または `DISCORD_TOKENS` を設定
+4. 必要に応じて `VOICEVOX_URL` や `DATABASE_URL` を本番環境向けに上書き
+5. デプロイ
 
 ## クレジット
 

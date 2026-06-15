@@ -61,24 +61,21 @@ DISCORD_TOKEN=token1
 # DISCORD_TOKENS=token1,token2,token3
 ```
 
-## Railway デプロイ
+## Coolify デプロイ
 
-1. Railway で新規プロジェクト作成
-2. PostgreSQL プラグインを追加
-3. VOICEVOX サービスを追加（Docker Image: `voicevox/voicevox_engine:cpu-latest`）
-   - Internal Networking を有効化
-4. Bot サービスを追加（GitHub リポジトリ連携、Root Directory: `bot/`）
-5. Bot の環境変数を設定:
+1. Coolify で GitHub リポジトリを Docker Compose アプリとして作成
+2. `docker-compose.yml` を使って `discord-bot` / `voicevox` / `postgres` を起動
+3. Bot の環境変数を設定:
    - `DISCORD_TOKEN` または `DISCORD_TOKENS` — Discord Developer Portal から取得
-   - `VOICEVOX_URL` — `http://<voicevoxサービス名>.railway.internal:50021`
-   - `DATABASE_URL` — PostgreSQL プラグインから自動注入
+   - `VOICEVOX_URL` — `http://voicevox:50021`
+   - `DATABASE_URL` — `postgresql://bot:bot@postgres:5432/voicevox_bot`
 
 ## 技術スタック
 
 - Python 3.12 / discord.py (voice)
 - VOICEVOX Engine (CPU版)
 - PostgreSQL + asyncpg
-- Docker Compose (ローカル) / Railway (本番)
+- Docker Compose (ローカル / Coolify 本番)
 - GitHub Actions (ruff + pytest)
 
 ## 実装上のポイント

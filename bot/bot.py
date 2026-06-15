@@ -3196,7 +3196,7 @@ def _run_multi_bots(discord_tokens: list[str]) -> None:
     logger.info(f"複数Botモードで起動: {len(discord_tokens)}プロセス")
 
     def _shutdown(_signum: int, _frame: FrameType | None) -> None:
-        # docker stop / Railway shutdown の SIGTERM を KeyboardInterrupt 経路に集約
+        # docker stop などの SIGTERM を KeyboardInterrupt 経路に集約
         nonlocal shutdown_requested
         shutdown_requested = True
         raise KeyboardInterrupt
