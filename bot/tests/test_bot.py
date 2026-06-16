@@ -1914,6 +1914,8 @@ def _make_interaction(guild_id=111, user_id=222, channel_id=333):
     interaction.user.voice = None  # join系で使う、必要に応じて上書き
     interaction.channel_id = channel_id
     interaction.response.send_message = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
     return interaction
 
 
@@ -3039,7 +3041,9 @@ class TestJoinCommand:
         interaction.user.voice.channel = channel
         interaction.guild.voice_client = None
         await join.callback(interaction)
-        msg = interaction.response.send_message.await_args.args[0]
+        interaction.response.defer.assert_awaited_once_with(thinking=True)
+        interaction.response.send_message.assert_not_awaited()
+        msg = interaction.followup.send.await_args.args[0]
         assert "VCへの接続に失敗" in msg
 
     async def test_move_to_failure_preserves_existing_state(self):
@@ -3065,7 +3069,9 @@ class TestJoinCommand:
         queues[9201] = deque([b"queued-audio"])
         await join.callback(interaction)
 
-        msg = interaction.response.send_message.await_args.args[0]
+        interaction.response.defer.assert_awaited_once_with(thinking=True)
+        interaction.response.send_message.assert_not_awaited()
+        msg = interaction.followup.send.await_args.args[0]
         assert "VCへの接続に失敗" in msg
         # 失敗時は queue が初期化されない（既存音声が破壊されない）
         assert b"queued-audio" in queues[9201]
@@ -4625,12 +4631,38 @@ class TestJoinStaleVoiceClient:
         with patch("bot.synthesize", new=AsyncMock(return_value=b"hi")):
             await join.callback(interaction)
 
+        interaction.response.defer.assert_awaited_once_with(thinking=True)
         # move_to ではなく channel.connect が呼ばれた
         stale_vc.move_to.assert_not_called()
         channel.connect.assert_awaited_once()
         # stale の cleanup として disconnect も呼ばれた
         stale_vc.disconnect.assert_awaited_once()
+        interaction.followup.send.assert_awaited_once()
+        assert "embed" in interaction.followup.send.await_args.kwargs
         queues.pop(8021, None)
+
+    async def test_reports_connect_failure_after_defer(self):
+        from bot import join
+
+        interaction = _make_interaction(guild_id=8023, user_id=8024)
+        channel = MagicMock()
+        channel.user_limit = 0
+        perms = MagicMock()
+        perms.connect = True
+        perms.speak = True
+        channel.permissions_for.return_value = perms
+        channel.connect = AsyncMock(side_effect=TimeoutError("timed out"))
+        interaction.user.voice = MagicMock()
+        interaction.user.voice.channel = channel
+        interaction.guild.voice_client = None
+
+        await join.callback(interaction)
+
+        interaction.response.defer.assert_awaited_once_with(thinking=True)
+        interaction.response.send_message.assert_not_awaited()
+        interaction.followup.send.assert_awaited_once()
+        msg = interaction.followup.send.await_args.args[0]
+        assert msg.startswith("VCへの接続に失敗しました:")
 
 
 class TestEmoticonReadingsAreNaturalJapanese:

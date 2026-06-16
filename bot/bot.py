@@ -2600,6 +2600,8 @@ async def join(interaction: discord.Interaction):
             await interaction.response.send_message("VCの人数制限に達しています")
             return
 
+    await interaction.response.defer(thinking=True)
+
     # voice_client が残骸として残っていることがあるため実接続を確認する
     existing_active = _has_active_voice_connection(guild)
     try:
@@ -2614,7 +2616,7 @@ async def join(interaction: discord.Interaction):
             await _reset_voice_state(guild)
             await channel.connect(self_deaf=True)
     except Exception as e:
-        await interaction.response.send_message(f"VCへの接続に失敗しました: {e}")
+        await interaction.followup.send(f"VCへの接続に失敗しました: {e}")
         return
 
     if existing_active:
@@ -2637,7 +2639,7 @@ async def join(interaction: discord.Interaction):
             "このチャンネルのメッセージを読み上げます"
         ),
     )
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
     # 接続時に音声で挨拶
     try:
