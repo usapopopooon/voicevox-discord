@@ -2697,8 +2697,6 @@ async def on_voice_state_update(
             )
             if self_moved_channels and vc and _is_vc_connected(vc):
                 bot_channel = vc.channel
-                if bot_channel is None:
-                    return
                 non_bot_members = [m for m in bot_channel.members if not m.bot]
                 if not non_bot_members:
                     # 管理者の移動などで Bot だけの VC に入った場合は、
@@ -2710,8 +2708,7 @@ async def on_voice_state_update(
                     await _safe_disconnect(vc)
                     _cleanup_guild_state(guild_id)
                     logger.info(
-                        "BotのみのVCへ移動されたため自動切断 "
-                        f"(Guild: {guild_id})"
+                        f"BotのみのVCへ移動されたため自動切断 (Guild: {guild_id})"
                     )
                     return
 
