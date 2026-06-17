@@ -2664,30 +2664,57 @@ async def on_voice_state_update(
     after: discord.VoiceState,
 ):
     if member.bot:
-        # 他の Bot のイベントは無視
-        if client.user is None or member.id != client.user.id:
-            return
+        is_self_event = client.user is not None and member.id == client.user.id
+        if is_self_event:
+            guild_id = member.guild.id
+            if after.channel is None:
+                # Bot 自身の切断 → 一時的な切断 (Discord WS 4006 等) に備えて
+                # `read_channels` は保持し、queue/locks など再生コンテキストのみ破棄。
+                # discord.py の auto-reconnect が成功すれば on_message で読み上げが
+                # 継続できる。/leave 等の真の終了では呼び出し側が前後で
+                # `_cleanup_guild_state` を呼んで `read_channels` も最終的に削除する
+                # ため、ここで保持しても安全（最終状態は全クリア）。
+                _cleanup_guild_playback_state(guild_id)
+                # 手動切断/kick の場合 discord.py は auto-reconnect しないので、
+                # DB session を即座に削除して次起動時の意図しない rejoin を防ぐ。
+                # 一時的なネットワーク断で discord.py が auto-reconnect する場合は
+                # 下の reconnect パスで `_safe_record_voice_session` が再記録する。
+                _spawn_background(_safe_forget_voice_session(guild_id))
+                return
 
-        guild_id = member.guild.id
-        if after.channel is None:
-            # Bot 自身の切断 → 一時的な切断 (Discord WS 4006 等) に備えて
-            # `read_channels` は保持し、queue/locks など再生コンテキストのみ破棄。
-            # discord.py の auto-reconnect が成功すれば on_message で読み上げが
-            # 継続できる。/leave 等の真の終了では呼び出し側が前後で
-            # `_cleanup_guild_state` を呼んで `read_channels` も最終的に削除する
-            # ため、ここで保持しても安全（最終状態は全クリア）。
-            _cleanup_guild_playback_state(guild_id)
-            # 手動切断/kick の場合 discord.py は auto-reconnect しないので、
-            # DB session を即座に削除して次起動時の意図しない rejoin を防ぐ。
-            # 一時的なネットワーク断で discord.py が auto-reconnect する場合は
-            # 下の reconnect パスで `_safe_record_voice_session` が再記録する。
-            _spawn_background(_safe_forget_voice_session(guild_id))
-        else:
             # Bot 自身の再接続 → 残キューがあれば再生再開
             vc = _as_voice_client(member.guild.voice_client)
             queue = queues.get(guild_id)
             if vc and queue and _can_start_playback(vc):
                 await play_next(guild_id, vc)
+
+            before_channel_id = getattr(before.channel, "id", None)
+            after_channel_id = getattr(after.channel, "id", None)
+            self_moved_channels = (
+                before.channel is not None
+                and after_channel_id is not None
+                and before_channel_id != after_channel_id
+            )
+            if self_moved_channels and vc and _is_vc_connected(vc):
+                bot_channel = vc.channel
+                if bot_channel is None:
+                    return
+                non_bot_members = [m for m in bot_channel.members if not m.bot]
+                if not non_bot_members:
+                    # 管理者の移動などで Bot だけの VC に入った場合は、
+                    # session を再記録せずその場で落とす。
+                    try:
+                        await forget_voice_session(guild_id)
+                    except Exception as e:
+                        logger.warning(f"VCセッション削除に失敗: {e}")
+                    await _safe_disconnect(vc)
+                    _cleanup_guild_state(guild_id)
+                    logger.info(
+                        "BotのみのVCへ移動されたため自動切断 "
+                        f"(Guild: {guild_id})"
+                    )
+                    return
+
             # discord.py の auto-reconnect 成功時は、切断時に消した DB session を
             # 再記録する。これによりネットワーク断後にプロセスが落ちても、
             # 次起動の `_restore_voice_sessions_on_startup` で復帰できる。
@@ -2700,7 +2727,9 @@ async def on_voice_state_update(
                         guild_id, after.channel.id, text_channel_id
                     )
                 )
-        return
+            return
+        # 他の Bot の入退室アナウンスはしない。ただし下の bot-only
+        # cleanup 判定には通し、Bot だけの VC に居座らないようにする。
 
     vc = _as_voice_client(member.guild.voice_client)
     if vc is None or not vc.is_connected():
@@ -2720,6 +2749,9 @@ async def on_voice_state_update(
         await _safe_disconnect(vc)
         _cleanup_guild_state(guild_id)
         logger.info(f"全員退出のため自動切断 (Guild: {guild_id})")
+        return
+
+    if member.bot:
         return
 
     # BotがいるVCへの入退室を通知

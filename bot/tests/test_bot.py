@@ -2594,6 +2594,79 @@ class TestOnVoiceStateUpdate:
             read_channels.pop(5001, None)
             play_locks.pop(5001, None)
 
+    async def test_auto_disconnect_when_other_bot_event_reveals_bot_only_channel(self):
+        from bot import on_voice_state_update, play_locks, queues, read_channels
+
+        member = MagicMock()
+        member.bot = True
+        member.id = 9999
+        member.guild.id = 5015
+        vc = member.guild.voice_client
+        vc.is_connected.return_value = True
+        vc.disconnect = AsyncMock()
+        bot_member = MagicMock()
+        bot_member.bot = True
+        vc.channel.members = [bot_member]
+        queues[5015] = deque()
+        read_channels[5015] = 100
+        play_locks[5015] = MagicMock()
+        try:
+            await on_voice_state_update(member, MagicMock(), MagicMock())
+            vc.disconnect.assert_awaited_once()
+            assert 5015 not in queues
+            assert 5015 not in read_channels
+            assert 5015 not in play_locks
+        finally:
+            queues.pop(5015, None)
+            read_channels.pop(5015, None)
+            play_locks.pop(5015, None)
+
+    async def test_self_move_into_bot_only_channel_disconnects_without_rerecord(
+        self, monkeypatch
+    ):
+        import bot
+        from bot import client, on_voice_state_update, queues, read_channels
+
+        original_user = client._connection.user
+        client._connection.user = MagicMock(id=4242)
+
+        forget_mock = AsyncMock()
+        record_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
+        monkeypatch.setattr(bot, "record_voice_session", record_mock)
+
+        member = MagicMock()
+        member.bot = True
+        member.id = 4242
+        member.guild.id = 5016
+        vc = member.guild.voice_client
+        vc.is_connected.return_value = True
+        vc.is_playing.return_value = True
+        vc.disconnect = AsyncMock()
+
+        before = MagicMock()
+        before.channel = MagicMock()
+        before.channel.id = 7000
+        after = MagicMock()
+        after.channel = vc.channel
+        after.channel.id = 7001
+        bot_member = MagicMock()
+        bot_member.bot = True
+        vc.channel.members = [bot_member]
+
+        read_channels[5016] = 8001
+        queues[5016] = deque()
+        try:
+            await on_voice_state_update(member, before, after)
+            forget_mock.assert_awaited_once_with(5016)
+            vc.disconnect.assert_awaited_once()
+            record_mock.assert_not_called()
+            assert 5016 not in read_channels
+        finally:
+            client._connection.user = original_user
+            read_channels.pop(5016, None)
+            queues.pop(5016, None)
+
     @patch("discord.FFmpegPCMAudio")
     async def test_join_announcement(self, mock_ffmpeg):
         from bot import on_voice_state_update, play_locks, queues
