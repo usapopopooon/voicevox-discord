@@ -80,7 +80,7 @@ services:
       COEIROINK_URL: ${COEIROINK_URL:-http://coeiroink:50031}
       SHAREVOX_URL: ${SHAREVOX_URL:-http://sharevox:50025}
       DEFAULT_SPEAKER_ID: "46"
-      DATABASE_URL: postgresql://bot:bot@voicevox-postgres:5432/voicevox_bot
+      DATABASE_URL: ${DATABASE_URL:-postgresql://bot:bot@postgres:5432/voicevox_bot}
       INTERNAL_TTS_API_ENABLED: ${INTERNAL_TTS_API_ENABLED:-false}
       INTERNAL_TTS_API_HOST: ${INTERNAL_TTS_API_HOST:-0.0.0.0}
       INTERNAL_TTS_API_PORT: ${INTERNAL_TTS_API_PORT:-8080}
