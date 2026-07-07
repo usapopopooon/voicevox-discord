@@ -82,6 +82,11 @@ services:
       INTERNAL_TTS_API_PORT: ${INTERNAL_TTS_API_PORT:-8080}
       INTERNAL_TTS_API_TOKEN: ${INTERNAL_TTS_API_TOKEN:-}
       INTERNAL_TTS_API_MAX_TEXT_LENGTH: ${INTERNAL_TTS_API_MAX_TEXT_LENGTH:-120}
+    networks:
+      default:
+      join-tts:
+        aliases:
+          - voicevox-discord-tts
     depends_on:
       - voicevox
       - postgres
@@ -89,3 +94,8 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  join-tts:
+    name: ${VOICEVOX_INTERNAL_TTS_NETWORK:-voicevox-discord-tts}
+    external: true
