@@ -14,6 +14,7 @@ services:
   coeiroink:
     profiles:
       - coeiroink
+    image: ${COEIROINK_IMAGE:-voicevox-discord-coeiroink:latest}
     build:
       context: ./engines/coeiroink
       dockerfile: Dockerfile
@@ -34,6 +35,7 @@ services:
   sharevox:
     profiles:
       - sharevox
+    image: ${SHAREVOX_IMAGE:-voicevox-discord-sharevox:latest}
     build:
       context: ./engines/sharevox
       dockerfile: Dockerfile
