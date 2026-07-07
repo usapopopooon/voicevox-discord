@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import hmac
 import io
 import logging
 import os
@@ -20,6 +21,7 @@ import aiohttp
 import asyncpg
 import discord
 import migrate as migration_runner
+from aiohttp import web
 from discord import app_commands, ui
 from dotenv import load_dotenv
 from kaomoji_builtin import KAOMOJI_DICT as _BUILTIN_KAOMOJI_DICT
@@ -117,6 +119,15 @@ TTS_AUDIO_QUERY_TIMEOUT_SECONDS = float(
 )
 TTS_SYNTHESIS_TIMEOUT_SECONDS = float(os.getenv("TTS_SYNTHESIS_TIMEOUT_SECONDS", "8"))
 TTS_SPEAKERS_TIMEOUT_SECONDS = float(os.getenv("TTS_SPEAKERS_TIMEOUT_SECONDS", "3"))
+
+# Internal API for sibling services on the same private Docker network.
+INTERNAL_TTS_API_ENABLED = _env_flag("INTERNAL_TTS_API_ENABLED", default=False)
+INTERNAL_TTS_API_HOST = os.getenv("INTERNAL_TTS_API_HOST", "0.0.0.0")
+INTERNAL_TTS_API_PORT = int(os.getenv("INTERNAL_TTS_API_PORT", "8080"))
+INTERNAL_TTS_API_TOKEN = os.getenv("INTERNAL_TTS_API_TOKEN", "").strip()
+INTERNAL_TTS_API_MAX_TEXT_LENGTH = int(
+    os.getenv("INTERNAL_TTS_API_MAX_TEXT_LENGTH", "120")
+)
 
 # 子プロセスの自動再起動（指数バックオフ + クラッシュループ検出）
 BOT_RESTART_BACKOFF_MAX_SECONDS = 60
@@ -216,6 +227,7 @@ class TtsClient(discord.Client):
     """discord.Client のサブクラス。終了時に共有 HTTP セッションも閉じる。"""
 
     async def close(self) -> None:
+        await stop_internal_tts_api()
         await close_http_session()
         await super().close()
 
@@ -233,6 +245,7 @@ client = TtsClient(
     max_messages=DISCORD_MESSAGE_CACHE_SIZE,
 )
 tree = app_commands.CommandTree(client)
+_internal_tts_api_runner: web.AppRunner | None = None
 
 # ギルドあたりの再生キュー最大長。スパム時は新規メッセージ側を drop して、
 # 「読み上げが何分も遅れて続く」体感遅延を抑える（小さい値ほど追従性が良い）。
@@ -2280,6 +2293,158 @@ async def synthesize(text: str, settings: VoiceSettings, cache: bool = False) ->
         in_flight_event.set()
 
 
+def _internal_tts_api_should_start() -> bool:
+    if not INTERNAL_TTS_API_ENABLED:
+        return False
+    if not INTERNAL_TTS_API_TOKEN:
+        logger.warning("内部TTS APIは有効ですが INTERNAL_TTS_API_TOKEN が未設定です")
+        return False
+    return not IS_MULTIBOT_CHILD or BOT_INSTANCE_INDEX == "1"
+
+
+def _internal_tts_api_authorized(request: web.Request) -> bool:
+    if not INTERNAL_TTS_API_TOKEN:
+        return False
+    authorization = request.headers.get("Authorization", "")
+    return hmac.compare_digest(authorization, f"Bearer {INTERNAL_TTS_API_TOKEN}")
+
+
+def _payload_float(
+    payload: Mapping[str, Any],
+    name: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw_value = payload.get(name, default)
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if value < minimum or value > maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _payload_int(
+    payload: Mapping[str, Any],
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw_value = payload.get(name, default)
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < minimum or value > maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+async def _internal_tts_health(_request: web.Request) -> web.Response:
+    return web.json_response({"ok": True})
+
+
+def _prepare_internal_tts_text(text: str, guild_id: int | None) -> str:
+    text = clean_text(text)
+    if guild_id is not None:
+        text = apply_dict(guild_id, text)
+    return apply_reading_corrections(text)
+
+
+async def _internal_tts_synthesize(request: web.Request) -> web.Response:
+    if not _internal_tts_api_authorized(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid_json"}, status=400)
+    if not isinstance(payload, Mapping):
+        return web.json_response({"error": "payload_must_be_object"}, status=400)
+
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        return web.json_response({"error": "text_required"}, status=400)
+    if len(text) > INTERNAL_TTS_API_MAX_TEXT_LENGTH:
+        return web.json_response({"error": "text_too_long"}, status=413)
+
+    try:
+        guild_id = (
+            _payload_int(payload, "guild_id", 0, 0, 18_446_744_073_709_551_615)
+            if "guild_id" in payload
+            else None
+        )
+        settings = VoiceSettings(
+            speaker_id=_payload_int(payload, "speaker_id", DEFAULT_SPEAKER, 0, 99999),
+            speed=_payload_float(payload, "speed", 1.0, 0.5, 2.0),
+            pitch=_payload_float(payload, "pitch", 0.0, -0.15, 0.15),
+            intonation=_payload_float(payload, "intonation", 1.0, 0.0, 2.0),
+            volume=_payload_float(payload, "volume", 1.0, 0.0, 2.0),
+        )
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    try:
+        text = _prepare_internal_tts_text(text, guild_id)
+        audio_data = await synthesize(
+            text,
+            settings,
+            cache=bool(payload.get("cache", False)),
+        )
+    except Exception:
+        logger.exception("内部TTS APIの合成に失敗しました")
+        return web.json_response({"error": "synthesis_failed"}, status=502)
+
+    return web.Response(
+        body=audio_data,
+        content_type="audio/wav",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def start_internal_tts_api() -> None:
+    global _internal_tts_api_runner
+    if not _internal_tts_api_should_start():
+        return
+    if _internal_tts_api_runner is not None:
+        return
+
+    app = web.Application(client_max_size=16 * 1024)
+    app.router.add_get("/healthz", _internal_tts_health)
+    app.router.add_post("/synthesize", _internal_tts_synthesize)
+
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    site = web.TCPSite(
+        runner,
+        host=INTERNAL_TTS_API_HOST,
+        port=INTERNAL_TTS_API_PORT,
+    )
+    try:
+        await site.start()
+    except Exception:
+        await runner.cleanup()
+        raise
+    _internal_tts_api_runner = runner
+    logger.info(
+        "内部TTS APIを起動しました: host=%s port=%s auth=%s",
+        INTERNAL_TTS_API_HOST,
+        INTERNAL_TTS_API_PORT,
+        "enabled" if INTERNAL_TTS_API_TOKEN else "disabled",
+    )
+
+
+async def stop_internal_tts_api() -> None:
+    global _internal_tts_api_runner
+    runner = _internal_tts_api_runner
+    if runner is None:
+        return
+    _internal_tts_api_runner = None
+    await runner.cleanup()
+
+
 async def play_next(guild_id: int, vc: discord.VoiceClient):
     """キューから次の音声を再生する"""
     lock = play_locks.setdefault(guild_id, asyncio.Lock())
@@ -2435,6 +2600,11 @@ async def on_ready():
         await client.change_presence(activity=discord.CustomActivity(name="読み上げ中"))
     except Exception as e:
         logger.warning(f"プレゼンス設定に失敗: {e}")
+
+    try:
+        await start_internal_tts_api()
+    except Exception as e:
+        logger.warning(f"内部TTS APIの起動に失敗: {e}")
 
     # 起動高速化のため一時無効化:
     # - スピーカー一覧の事前取得（各TTSエンジンへのHTTPアクセス）

@@ -43,6 +43,41 @@ def mock_db_pool():
         bot.db_pool = original
 
 
+class TestInternalTtsApi:
+    def test_api_does_not_start_without_token(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(bot, "INTERNAL_TTS_API_ENABLED", True)
+        monkeypatch.setattr(bot, "INTERNAL_TTS_API_TOKEN", "")
+
+        assert bot._internal_tts_api_should_start() is False
+
+    def test_api_requires_authorization_when_token_configured(self, monkeypatch):
+        import bot
+
+        monkeypatch.setattr(bot, "INTERNAL_TTS_API_TOKEN", "secret")
+        request = MagicMock()
+        request.headers = {"Authorization": "Bearer secret"}
+
+        assert bot._internal_tts_api_authorized(request) is True
+
+        request.headers = {}
+        assert bot._internal_tts_api_authorized(request) is False
+
+    def test_prepare_text_applies_guild_dictionary(self):
+        import bot
+
+        bot.guild_dicts[123] = {"Alice": "アリス"}
+        bot._dict_patterns.pop(123, None)
+        try:
+            text = bot._prepare_internal_tts_text("Aliceさんが入室しました", 123)
+        finally:
+            bot.guild_dicts.pop(123, None)
+            bot._dict_patterns.pop(123, None)
+
+        assert "アリスさん" in text
+
+
 class TestSynthesize:
     async def test_returns_audio_bytes(self):
         from bot import VoiceSettings, synthesize
