@@ -19,7 +19,7 @@ services:
     ports:
       - "5432:5432"
 
-  discord-bot:
+  voicevox-discord:
     # 本番Dockerfileではなく開発用を使う
     build:
       context: ./bot
@@ -27,7 +27,7 @@ services:
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN}
       DISCORD_TOKENS: ${DISCORD_TOKENS}
-      DATABASE_URL: postgresql://bot:bot@postgres:5432/voicevox_bot
+      DATABASE_URL: postgresql://bot:bot@voicevox-postgres:5432/voicevox_bot
     env_file:
       - .env
     volumes:

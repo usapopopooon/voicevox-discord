@@ -69,7 +69,7 @@ services:
           - voicevox-postgres
     restart: unless-stopped
 
-  discord-bot:
+  voicevox-discord:
     build:
       context: ./bot
       dockerfile: Dockerfile

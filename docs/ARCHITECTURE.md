@@ -12,7 +12,8 @@ Discord のテキストチャンネルに投稿されたメッセージを、VOI
 │  Coolify / Docker Compose                        │
 │                                                  │
 │  ┌──────────────┐    ┌───────────────────────┐   │
-│  │ discord-bot  │───→│ voicevox              │   │
+│  │ voicevox-    │───→│ voicevox              │   │
+│  │ discord      │    │                       │   │
 │  │ (Python)     │    │ (VOICEVOX Engine CPU)  │   │
 │  │              │    │ :50021                 │   │
 │  └──────┬───────┘    └───────────────────────┘   │
@@ -26,7 +27,7 @@ Discord のテキストチャンネルに投稿されたメッセージを、VOI
     Discord API
 ```
 
-- **discord-bot**: Bot 本体。スラッシュコマンドとメッセージ読み上げを処理
+- **voicevox-discord**: Bot 本体。スラッシュコマンドとメッセージ読み上げを処理
 - **voicevox**: VOICEVOX Engine (CPU版)。テキスト→音声合成 API
 - **PostgreSQL**: ユーザー設定・辞書の永続化
 
@@ -274,7 +275,7 @@ docker compose up
 
 | サービス | 設定 |
 |---|---|
-| **Bot** | `docker-compose.yml` の `discord-bot` サービス。`bot/Dockerfile` でビルド |
+| **Bot** | `docker-compose.yml` の `voicevox-discord` サービス。`bot/Dockerfile` でビルド |
 | **PostgreSQL** | `postgres` サービス。`pgdata` ボリュームで永続化 |
 | **VOICEVOX** | `voicevox` サービス。`voicevox/voicevox_engine:cpu-latest` を利用 |
 | **COEIROINK v1** | 任意。`COMPOSE_PROFILES=coeiroink` で有効化し、`engines/coeiroink/Dockerfile` でビルド |

@@ -64,13 +64,13 @@ DISCORD_TOKEN=token1
 ## Coolify デプロイ
 
 1. Coolify で GitHub リポジトリを Docker Compose アプリとして作成
-2. `docker-compose.yml` を使って `discord-bot` / `voicevox` / `postgres` を起動
+2. `docker-compose.yml` を使って `voicevox-discord` / `voicevox` / `postgres` を起動
 3. Bot の環境変数を設定:
    - `DISCORD_TOKEN` または `DISCORD_TOKENS` — Discord Developer Portal から取得
    - `VOICEVOX_URL` — `http://voicevox:50021`
    - `COEIROINK_URL` — `http://coeiroink:50031`
    - `SHAREVOX_URL` — `http://sharevox:50025`
-   - `DATABASE_URL` — `postgresql://bot:bot@postgres:5432/voicevox_bot`
+   - `DATABASE_URL` — `postgresql://bot:bot@voicevox-postgres:5432/voicevox_bot`
 
 ### COEIROINK v1 を使う場合
 
