@@ -67,6 +67,9 @@ services:
       default:
         aliases:
           - voicevox-postgres
+      join-tts:
+        aliases:
+          - voicevox-discord-tts
     restart: unless-stopped
 
   voicevox-discord:
@@ -80,17 +83,13 @@ services:
       COEIROINK_URL: ${COEIROINK_URL:-http://coeiroink:50031}
       SHAREVOX_URL: ${SHAREVOX_URL:-http://sharevox:50025}
       DEFAULT_SPEAKER_ID: "46"
-      DATABASE_URL: ${DATABASE_URL:-postgresql://bot:bot@postgres:5432/voicevox_bot}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://bot:bot@127.0.0.1:5432/voicevox_bot}
       INTERNAL_TTS_API_ENABLED: ${INTERNAL_TTS_API_ENABLED:-false}
       INTERNAL_TTS_API_HOST: ${INTERNAL_TTS_API_HOST:-0.0.0.0}
       INTERNAL_TTS_API_PORT: ${INTERNAL_TTS_API_PORT:-8080}
       INTERNAL_TTS_API_TOKEN: ${INTERNAL_TTS_API_TOKEN:-}
       INTERNAL_TTS_API_MAX_TEXT_LENGTH: ${INTERNAL_TTS_API_MAX_TEXT_LENGTH:-120}
-    networks:
-      default:
-      join-tts:
-        aliases:
-          - voicevox-discord-tts
+    network_mode: service:postgres
     depends_on:
       - voicevox
       - postgres
