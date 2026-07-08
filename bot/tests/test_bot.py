@@ -6005,11 +6005,14 @@ class TestHelpCommand:
     @pytest.mark.parametrize(
         "command", ["/vc", "/panel", "/mute", "/unmute", "/showmute"]
     )
-    def test_help_embed_lists_remaining_commands(self, command):
+    def test_help_embed_lists_support_commands(self, command):
         from bot import _build_help_embed
 
         description = _build_help_embed().description or ""
         assert command in description
+        assert "コマンド" in description
+        assert "補助操作" not in description
+        assert "残しているコマンド" not in description
 
     @pytest.mark.parametrize(
         "command",

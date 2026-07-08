@@ -266,30 +266,31 @@ class DictDeleteModal(ui.Modal, title="辞書から削除"):
 # --- 操作パネル / 設定 UI ---
 
 
+def _active_voice_connection_count() -> int:
+    """この Bot process が現在接続している VC 数を返す。"""
+    count = 0
+    for raw_vc in getattr(_ctx().client, "voice_clients", []):
+        vc = _ctx()._as_voice_client(raw_vc)
+        if vc is not None and _ctx()._is_vc_connected(vc):
+            count += 1
+    return count
+
+
 def build_panel_embed(
-    guild: discord.Guild, *, notice: str | None = None
+    _guild: discord.Guild, *, notice: str | None = None
 ) -> discord.Embed:
     """runtime state を集めて control-panel embed を描画する。
 
     引数:
-        guild: panel state を表示する Discord guild。
+        _guild: 既存呼び出し互換のため受け取る Discord guild。
         notice: 接続完了など、その投稿だけに先頭表示する短い案内。
 
     戻り値:
         panel feature が生成した Discord embed。
     """
-    vc = _ctx()._as_voice_client(guild.voice_client)
-    connected = vc is not None and _ctx()._is_vc_connected(vc)
-    playing = vc is not None and _ctx()._is_vc_playing(vc)
-    channel = getattr(vc, "channel", None) if vc is not None else None
     return build_panel_embed_from_snapshot(
         PanelSnapshot(
-            connected=connected,
-            playing=playing,
-            voice_channel_name=getattr(channel, "name", "未接続"),
-            read_channel_id=_ctx().read_channels.get(guild.id),
-            queue_length=len(_ctx().queues.get(guild.id, [])),
-            queue_maxlen=_ctx().QUEUE_MAXLEN,
+            process_voice_connection_count=_active_voice_connection_count(),
             license_lines=_ctx()._panel_license_lines(),
         ),
         notice=notice,
@@ -1069,7 +1070,7 @@ class ControlPanelView(ui.View):
     async def repost_button(
         self, interaction: discord.Interaction, button: DiscordButton
     ):
-        """現在の状態で新しい公開 panel message を投稿する。"""
+        """最新内容で新しい公開 panel message を投稿する。"""
         guild = await _ctx()._require_guild_interaction(interaction)
         if guild is None:
             return
