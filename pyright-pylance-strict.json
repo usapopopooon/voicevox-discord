@@ -1,0 +1,21 @@
+{
+  "include": ["bot"],
+  "exclude": [
+    "bot/tests",
+    "bot/**/test_*.py",
+    "bot/migrations/20*.py",
+    "bot/__pycache__",
+    "**/__pycache__"
+  ],
+  "pythonVersion": "3.12",
+  "stubPath": "typings",
+  "typeCheckingMode": "strict",
+  "reportMissingTypeStubs": false,
+  "reportUnknownMemberType": "error",
+  "reportUnknownVariableType": "error",
+  "reportUnknownArgumentType": "error",
+  "reportUnknownParameterType": "error",
+  "reportMissingTypeArgument": "error",
+  "reportConstantRedefinition": "error",
+  "reportUnusedFunction": false
+}

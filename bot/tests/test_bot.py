@@ -572,10 +572,10 @@ class TestReadingCorrections:
         # === ナルト ===
         assert apply_reading_corrections("螺旋丸") == "ラセンガン"
         assert apply_reading_corrections("穢土転生") == "エドテンセイ"
-        # === BLEACH ===
+        # === ブリーチ ===
         assert apply_reading_corrections("卍解") == "バンカイ"
         assert apply_reading_corrections("斬魄刀") == "ザンパクトウ"
-        # === ONE PIECE ===
+        # === ワンピース ===
         assert apply_reading_corrections("王下七武海") == "オウカシチブカイ"
         assert apply_reading_corrections("天竜人") == "テンリュウビト"
 
@@ -993,6 +993,24 @@ class TestCleanText:
         finally:
             bot._KAOMOJI_DICT = original_dict
             bot._KAOMOJI_PATTERN = original_pattern
+
+    def test_rebuild_kaomoji_patterns_refreshes_compat_alias(self):
+        """辞書更新後の rebuild が bot 側の互換 alias にも反映される"""
+        import bot
+        from bot import clean_text
+
+        original_dict = bot._KAOMOJI_DICT
+        original_pattern = bot._KAOMOJI_PATTERN
+        bot._KAOMOJI_DICT = {"(新)": "しんき"}
+        try:
+            bot._rebuild_kaomoji_patterns()
+            assert bot._KAOMOJI_PATTERN is not None
+            assert bot._KAOMOJI_PATTERN.search("(新)") is not None
+            assert clean_text("あ(新)い") == "あしんきい"
+        finally:
+            bot._KAOMOJI_DICT = original_dict
+            bot._KAOMOJI_PATTERN = original_pattern
+            bot._rebuild_kaomoji_patterns()
 
 
 class TestMute:
@@ -1652,7 +1670,7 @@ class TestDbOperations:
         await save_user_setting(111, 222, VoiceSettings(speaker_id=5, speed=1.2))
         conn.execute.assert_awaited_once()
         args = conn.execute.await_args.args
-        # (sql, guild_id, user_id, speaker_id, speed, pitch, intonation, volume)
+        # (SQL, guild ID, user ID, 話者 ID, 話速, 音高, 抑揚, 音量)
         assert args[1] == 111
         assert args[2] == 222
         assert args[3] == 5
@@ -1933,7 +1951,7 @@ class TestFetchSpeakersMultiEngine:
             assert "[VOICEVOX] ずんだもん" in bot.characters
             assert "[COEIROINK] つくよみ" in bot.characters
             # COEIROINKのオフセット適用を確認
-            assert 10000 in bot.speakers_cache  # real_id=0 + 10000
+            assert 10000 in bot.speakers_cache  # 実話者 ID 0 + offset 10000
         finally:
             bot.speakers_cache.clear()
             bot.speaker_engine.clear()
@@ -2153,6 +2171,244 @@ class TestDictCmd:
         interaction = _make_interaction()
         await dict_cmd.callback(interaction)
         interaction.response.send_message.assert_awaited_once()
+
+    async def test_dict_message_paginates_and_has_delete_select(self):
+        import bot
+        from bot import build_dict_message
+
+        guild_id = 8801
+        bot.guild_dicts[guild_id] = {f"word{i:02d}": f"ヨミ{i:02d}" for i in range(12)}
+        try:
+            content, view = build_dict_message(guild_id)
+            assert "1/2ページ" in content
+            assert len(view.children) >= 4
+        finally:
+            bot.guild_dicts.pop(guild_id, None)
+
+
+class TestPanelStatusLicenseCommands:
+    async def test_panel_command_sends_embed_and_view(self):
+        from bot import panel_cmd
+
+        interaction = _make_interaction()
+        await panel_cmd.callback(interaction)
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert kwargs["embed"].title == "読み上げBot 操作パネル"
+        assert kwargs["view"] is not None
+
+    async def test_panel_view_disables_runtime_actions_when_disconnected(self):
+        import bot
+
+        guild = MagicMock()
+        guild.id = 9912
+        guild.voice_client = None
+
+        view = bot.ControlPanelView(guild)
+        buttons = {
+            child.custom_id: child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+        }
+        labels = {
+            child.label
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+        }
+
+        assert buttons["panel:connect"].disabled is False
+        assert buttons["panel:disconnect"].disabled is True
+        assert buttons["panel:skip"].disabled is True
+        assert "管理者デバッグ" not in labels
+
+    async def test_panel_view_enables_disconnect_and_skip_when_playing(self):
+        import bot
+
+        guild = MagicMock()
+        guild.id = 9913
+        guild.voice_client.is_connected.return_value = True
+        guild.voice_client.is_playing.return_value = True
+
+        view = bot.ControlPanelView(guild)
+        buttons = {
+            child.custom_id: child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+        }
+
+        assert buttons["panel:connect"].disabled is True
+        assert buttons["panel:disconnect"].disabled is False
+        assert buttons["panel:skip"].disabled is False
+
+    async def test_panel_view_disables_skip_when_connected_but_idle(self):
+        import bot
+
+        guild = MagicMock()
+        guild.id = 9914
+        guild.voice_client.is_connected.return_value = True
+        guild.voice_client.is_playing.return_value = False
+
+        view = bot.ControlPanelView(guild)
+        buttons = {
+            child.custom_id: child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+        }
+
+        assert buttons["panel:connect"].disabled is True
+        assert buttons["panel:disconnect"].disabled is False
+        assert buttons["panel:skip"].disabled is True
+
+    async def test_status_command_is_private_by_default(self):
+        from bot import status_cmd
+
+        interaction = _make_interaction()
+        await status_cmd.callback(interaction)
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert kwargs["embed"].title == "読み上げBot ステータス"
+        assert kwargs["ephemeral"] is True
+
+    async def test_license_command_sends_license_embed(self):
+        from bot import license_cmd
+
+        interaction = _make_interaction()
+        await license_cmd.callback(interaction)
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert kwargs["embed"].title == "音声ライセンス / クレジット"
+        assert kwargs["ephemeral"] is True
+
+    async def test_license_command_rejects_dm_without_double_response(self):
+        from bot import license_cmd
+
+        interaction = _make_interaction()
+        interaction.guild = None
+        await license_cmd.callback(interaction)
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "このコマンドはサーバー内でのみ利用できます"
+        )
+
+    def test_license_embed_contains_current_credit_candidate(self):
+        import bot
+
+        bot.speakers_cache[10000] = "[COEIROINK] つくよみちゃん（れいせい）"
+        bot.speaker_engine[10000] = ("http://coeiroink:50031", 0)
+        bot.user_settings[(9901, 9902)] = bot.VoiceSettings(speaker_id=10000)
+        try:
+            embed = bot._build_license_embed(guild_id=9901, user_id=9902)
+            values = "\n".join(field.value for field in embed.fields)
+            assert "COEIROINK" in values
+            assert "クレジット候補" in values
+            assert "COEIROINK: つくよみちゃん" in values
+            assert "COEIROINK: [COEIROINK]" not in values
+            assert "規約:" in values
+        finally:
+            bot.speakers_cache.pop(10000, None)
+            bot.speaker_engine.pop(10000, None)
+            bot.user_settings.pop((9901, 9902), None)
+
+    def test_status_embed_does_not_expose_internal_debug_details(self):
+        import bot
+
+        guild = MagicMock()
+        guild.id = 9901
+        guild.voice_client = None
+        bot._recent_errors.clear()
+        try:
+            bot._record_recent_error(
+                "message.synthesize.failed",
+                "internal error detail",
+                "trace-hidden",
+                guild_id=9901,
+            )
+
+            embed = bot._build_status_embed(guild)
+            values = "\n".join(field.value for field in embed.fields)
+            assert "internal error detail" not in values
+            assert "trace-hidden" not in values
+            assert "DB:" not in values
+            assert "Bot instance" not in values
+            assert "直近エラー" not in values
+            assert "guild_id=" not in (embed.footer.text or "")
+        finally:
+            bot._recent_errors.clear()
+
+    async def test_voice_sample_failure_does_not_expose_trace_id(self):
+        import bot
+
+        interaction = _make_interaction()
+        interaction.response.is_done.return_value = False
+        interaction.guild.voice_client.is_connected.return_value = True
+
+        with patch("bot.synthesize", new=AsyncMock(side_effect=RuntimeError("boom"))):
+            await bot._play_voice_sample(interaction, "テスト")
+
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert (
+            kwargs["content"]
+            == "試聴に失敗しました。しばらくしてから再試行してください。"
+        )
+        assert "trace" not in kwargs["content"]
+        assert "boom" not in kwargs["content"]
+
+    async def test_speaker_character_view_paginates_candidates(self):
+        import bot
+
+        original_engines = list(bot.ENGINES)
+        bot.ENGINES = [
+            ("VOICEVOX", "http://voicevox:50021", 0),
+            ("COEIROINK", "http://coeiroink:50031", 10000),
+        ]
+        names = [f"[VOICEVOX] char{i:02d}" for i in range(30)]
+        for i, name in enumerate(names):
+            bot.characters[name] = [(i, "ノーマル")]
+        try:
+            view = bot.SpeakerCharacterView(9910, 9911, "VOICEVOX")
+            select = next(
+                child
+                for child in view.children
+                if isinstance(child, bot.SpeakerCharacterSelect)
+            )
+            assert len(select.options) == 25
+            assert any(
+                isinstance(child, bot.SpeakerCharacterPageButton)
+                and child.label == "次へ"
+                and not child.disabled
+                for child in view.children
+            )
+
+            second_page = bot.SpeakerCharacterView(9910, 9911, "VOICEVOX", page=1)
+            select2 = next(
+                child
+                for child in second_page.children
+                if isinstance(child, bot.SpeakerCharacterSelect)
+            )
+            assert len(select2.options) == 5
+        finally:
+            bot.ENGINES = original_engines
+            for name in names:
+                bot.characters.pop(name, None)
+
+    async def test_speaker_style_view_paginates_styles(self):
+        import bot
+
+        char_name = "[VOICEVOX] style-heavy"
+        bot.characters[char_name] = [(i, f"style{i:02d}") for i in range(27)]
+        try:
+            view = bot.SpeakerStyleView(9920, 9921, "VOICEVOX", char_name, page=1)
+            select = next(
+                child
+                for child in view.children
+                if isinstance(child, bot.SpeakerStyleSelect)
+            )
+            assert len(select.options) == 2
+            assert any(
+                isinstance(child, bot.SpeakerStylePageButton)
+                and child.label == "前へ"
+                and not child.disabled
+                for child in view.children
+            )
+        finally:
+            bot.characters.pop(char_name, None)
 
 
 class TestSpeakerCommand:
@@ -3153,6 +3409,7 @@ class TestJoinCommand:
         interaction.response.send_message.assert_not_awaited()
         msg = interaction.followup.send.await_args.args[0]
         assert "VCへの接続に失敗" in msg
+        assert "network error" not in msg
 
     async def test_move_to_failure_preserves_existing_state(self):
         """既に接続中のBotを別VCへ移動する際 move_to が失敗したらエラー応答を返し、
@@ -3986,7 +4243,7 @@ class TestSynthesizeCache:
         try:
             bot._synth_cache.clear()
             bot.speaker_engine.clear()
-            # requested -> primary, default -> fallback
+            # 要求話者 -> primary、default 話者 -> fallback
             bot.speaker_engine[999] = ("http://primary:50021", 99)
             bot.speaker_engine[3] = ("http://fallback:50021", 3)
             fallback_key = (
@@ -4191,7 +4448,7 @@ class TestMakeAudioSource:
     def test_ffmpeg_fallback_for_wrong_sample_width(self, mock_ffmpeg):
         from bot import _make_audio_source
 
-        wav = _make_wav_bytes(channels=2, rate=48000, width=1)  # 8bit
+        wav = _make_wav_bytes(channels=2, rate=48000, width=1)  # 8 bit 音声
         _make_audio_source(wav)
         mock_ffmpeg.assert_called_once()
 
@@ -4202,7 +4459,7 @@ class TestMakeAudioSource:
         from bot import _make_audio_source
 
         # 3840未満しかPCMが出ないサイズにする（48000Hz stereo 16bit = 3840B/20ms）
-        # n_samples=240 = 5ms → PCM 960B
+        # sample 数 240 = 5ms → PCM 960B
         wav = _make_wav_bytes(channels=2, rate=48000, width=2, n_samples=240)
         source = _make_audio_source(wav)
         assert isinstance(source, discord.PCMAudio)
@@ -4729,7 +4986,7 @@ class TestJoinStaleVoiceClient:
         channel.connect = AsyncMock()
         interaction.user.voice = MagicMock()
         interaction.user.voice.channel = channel
-        # stale voice_client（is_connected=False）
+        # stale な voice_client（is_connected=False）
         stale_vc = MagicMock()
         stale_vc.is_connected.return_value = False
         stale_vc.disconnect = AsyncMock()
@@ -4770,7 +5027,8 @@ class TestJoinStaleVoiceClient:
         interaction.response.send_message.assert_not_awaited()
         interaction.followup.send.assert_awaited_once()
         msg = interaction.followup.send.await_args.args[0]
-        assert msg.startswith("VCへの接続に失敗しました:")
+        assert msg.startswith("VCへの接続に失敗しました。")
+        assert "timed out" not in msg
 
 
 class TestEmoticonReadingsAreNaturalJapanese:
@@ -5299,6 +5557,7 @@ class TestHelpCommand:
         "command",
         [
             "/vc",
+            "/panel",
             "/join",
             "/leave",
             "/skip",
@@ -5308,6 +5567,9 @@ class TestHelpCommand:
             "/mute",
             "/unmute",
             "/showmute",
+            "/status",
+            "/license",
+            "/credit",
             "/help",
         ],
     )

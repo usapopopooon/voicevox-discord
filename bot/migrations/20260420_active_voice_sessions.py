@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Create active_voice_sessions table.
+"""active_voice_sessions table を作成する。
 
-Tracks which voice channel each guild's bot is currently joined to,
-so the bot can rejoin after a process restart or unexpected disconnect.
+各 guild の Bot が現在参加している voice channel を記録し、
+process restart や想定外の切断後に再参加できるようにする。
 
-Usage:
-  DATABASE_URL=... python bot/migrations/20260420_active_voice_sessions.py
+使用例:
+  実行: DATABASE_URL=... python bot/migrations/20260420_active_voice_sessions.py
 
-Idempotent (CREATE TABLE IF NOT EXISTS).
+冪等（CREATE TABLE IF NOT EXISTS）。
 """
 
 from __future__ import annotations

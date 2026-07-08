@@ -36,6 +36,8 @@ jobs:
           pip install -r bot/requirements.dev.txt
       - name: Pyright (strict)
         run: pyright
+      - name: Pyright (Pylance strict diagnostics)
+        run: pyright --project pyright-pylance-strict.json
 
   test:
     runs-on: ubuntu-latest
@@ -52,4 +54,4 @@ jobs:
         env:
           DISCORD_TOKEN: "test-token-for-ci"
           VOICEVOX_URL: "http://localhost:50021"
-        run: pytest bot/tests/ -v
+        run: pytest bot/ -v

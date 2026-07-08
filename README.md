@@ -5,6 +5,7 @@ Discord のテキストチャンネルのメッセージを VOICEVOX の音声�
 ## 機能
 
 - テキストチャンネルのメッセージを自動読み上げ
+- 操作パネルから接続、切断、スキップ、音声設定、話者変更、辞書、状態確認へアクセス
 - ギルドごとに独立したユーザー音声設定（キャラクター・話速・音高・抑揚・音量）
 - ギルドごとの読み上げ辞書（単語→読みの置換、ビルドインと完全重複するエントリは登録拒否＋起動時に自動掃除）
 - built-in 読み辞書（日本語難読語・英単語・CJK互換単位記号 ㌔/㍉/㎏/㎐ 等）を DB 保存し、起動時にメモリへロード
@@ -15,11 +16,14 @@ Discord のテキストチャンネルのメッセージを VOICEVOX の音声�
 - 複数エンジン対応（VOICEVOX / COEIROINK / SHAREVOX）
 - Bot 再接続時の読み上げ再開、TTS障害通知のレート制限
 - デプロイ・プロセス再起動後に元 VC へ自動復帰（人がいない/権限がない/部屋削除時は復帰せず session 削除）
+- `/status` と event 名付きログによる状態確認・運用調査支援
+- `/license` `/credit` による音声ライセンス・クレジット確認
 
 ## コマンド一覧
 
 | コマンド | 説明 |
 |---|---|
+| `/panel` | 操作パネルを表示 |
 | `/join` | ボイスチャンネルに接続 |
 | `/leave` | ボイスチャンネルから切断 |
 | `/vc` | 接続/切断をトグル |
@@ -30,6 +34,48 @@ Discord のテキストチャンネルのメッセージを VOICEVOX の音声�
 | `/mute <user>` | ユーザーの読み上げをミュート |
 | `/unmute <user>` | ミュートを解除 |
 | `/showmute` | ミュート中のユーザー一覧 |
+| `/status` | 接続状態・キュー・TTSエンジン状態を表示 |
+| `/license` | 音声エンジン/話者のライセンス確認先を表示 |
+| `/credit` | 現在の話者のクレジット候補を表示 |
+
+## 運用・調査
+
+ログは `event=... fields={...}` の形式で、`guild_id`、`channel_id`、
+`user_id`、`speaker_id`、`queue_length`、`latency_ms`、`trace_id` などを
+可能な範囲で出力します。利用者向けには `/status` で接続状態とエンジン状態を確認できます。
+直近エラーや trace ID などの内部調査情報は、Bot運営側のログでのみ扱います。
+
+## 操作パネル
+
+`/panel` は接続、切断、スキップを別ボタンに分け、現在の接続・再生状態に応じて
+押せない操作を無効化します。話者変更、音声設定、辞書は個人設定系の導線としてまとめ、
+状態、ライセンス、ヘルプ、更新は確認系の導線として配置します。
+
+## 開発・テスト方針
+
+新しい機能は `bot/features/<feature>/` に package by feature で追加します。
+小さい feature は `models.py` と `presentation.py` 程度に留め、複雑になった feature だけ
+`domain.py`, `application.py`, `infrastructure.py` を追加します。全 feature に最初から
+同じ層を強制せず、必要になったところから Clean Architecture 的な依存方向を導入します。
+読み辞書や顔文字辞書のように機能名を付けられるものは `shared` ではなく、その feature
+（この場合は `dictionary`）に置きます。`shared` は複数 feature で使うが所有者を決めにくい
+横断処理に限定し、必要になるまでは作りません。
+
+`domain.py` は Discord、DB、HTTP、環境変数、`bot.py` のグローバル状態に依存させません。
+外部状態は `bot.py` で snapshot にして渡し、Discord Embed / View などの表示は
+`presentation.py` に寄せます。
+
+`bot.py` は Discord のイベント、コマンド登録、既存状態との接続を担う composition root として残します。
+テストは `test_domain.py` や `test_presentation.py` として実装の近くに置きます。
+既存互換や統合寄りの回帰テストは `bot/tests/test_bot.py` に残し、CI とローカルでは
+`pytest bot` で従来テストと colocated test の両方を実行します。
+型チェックは通常の `pyright` に加えて、Pylance 寄りの unknown / constant 診断を
+`pyright --project pyright-pylance-strict.json` で必ず確認します。
+
+この方針は以下の記事の「Package by Feature を土台にし、複雑になった feature だけ層を導入する」
+考え方を、この Python Bot 向けに読み替えたものです。
+
+- https://zenn.dev/yoshi333/articles/b25d7ff4915a57
 
 ## ローカル開発
 
@@ -101,7 +147,7 @@ COEIROINK と併用する場合は `COMPOSE_PROFILES=coeiroink,sharevox` にし�
 - COEIROINK v1 / SHAREVOX（任意）
 - PostgreSQL + asyncpg
 - Docker Compose (ローカル / Coolify 本番)
-- GitHub Actions (ruff + pytest)
+- GitHub Actions (ruff + pyright + Pylance strict pyright + pytest)
 
 ## 実装上のポイント
 
@@ -111,15 +157,19 @@ COEIROINK と併用する場合は `COMPOSE_PROFILES=coeiroink,sharevox` にし�
 - ギルド単位キュー + 再生ロックで多重再生競合を防止
 - 起動時に DB マイグレーションを自動実行（`schema_migrations` で適用履歴管理）
 - メッセージ前処理は fast-path ガードで不要な regex/emoji 置換をスキップ
+- package by feature と colocated test により、UI 表示やライセンス案内などを feature 単位で拡張
 
 詳細は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照してください。
 
 ## クレジット
 
 音声利用時は、各ボイスの利用規約に従ってクレジット表記してください。
+Botは `/license` と `/credit` で公式サイト・規約ページ・クレジット候補への導線を提供しますが、
+表示されるクレジット候補は目安です。実際の利用可否や表記条件は各公式サイト・各話者の規約を
+必ず確認してください。
 
 各ボイスおよびライセンスはこちら:
 
-- VOICEVOX: https://voicevox.hiroshiba.jp/
-- COEIROINK: https://coeiroink.com/
+- VOICEVOX: https://voicevox.hiroshiba.jp/ / https://voicevox.hiroshiba.jp/term/
+- COEIROINK: https://coeiroink.com/ / https://coeiroink.com/terms
 - SHAREVOX: https://sharevox.app/

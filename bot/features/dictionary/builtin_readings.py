@@ -1,9 +1,8 @@
-"""Built-in reading correction dictionaries for kanji and English words.
+"""dictionary feature 用の built-in 読み補正辞書。
 
-Split out from bot.py to keep the main module focused on runtime logic.
-The Bot keeps runtime-mutable copies (``_READING_CORRECTIONS``,
-``_ENGLISH_WORD_READINGS``) that can be overridden via the ``builtin_reading_dicts``
-DB table; the values below serve as the defaults and fallback snapshot.
+本番 instance は ``builtin_reading_dicts`` DB table 経由で built-in を override
+できるため、Bot はこれらの辞書の runtime-mutable copy を保持する。
+したがって、この module の値は新規 deployment 向けの default snapshot / fallback。
 """
 
 from __future__ import annotations
@@ -247,7 +246,15 @@ _HIRA_TO_KATA = str.maketrans(
 
 
 def to_katakana(s: str) -> str:
-    """ひらがなをカタカナに変換する（既にカタカナの文字はそのまま）。"""
+    """読みの中にあるひらがなをカタカナへ変換する。
+
+    引数:
+        s: ユーザー入力または DB 読み込み由来の読み text。
+
+    戻り値:
+        ひらがなをカタカナへ正規化した文字列。既存のカタカナ、ASCII、記号、漢字は
+        そのまま残す。
+    """
     return s.translate(_HIRA_TO_KATA)
 
 

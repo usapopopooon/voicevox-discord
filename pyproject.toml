@@ -14,11 +14,13 @@ select = ["E", "W", "F", "I", "UP"]
 include = ["bot"]
 exclude = [
     "bot/tests",
-    "bot/migrations",
+    "bot/**/test_*.py",
+    "bot/migrations/20*.py",
     "bot/__pycache__",
     "**/__pycache__",
 ]
 pythonVersion = "3.12"
+stubPath = "typings"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
 # 外部ライブラリ (asyncpg, discord.py 等) の型スタブ不足によるノイズを抑制。
@@ -36,4 +38,5 @@ reportConstantRedefinition = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["bot/tests"]
+testpaths = ["bot"]
+python_files = ["test_*.py"]

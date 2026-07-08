@@ -36,30 +36,176 @@ Discord のテキストチャンネルに投稿されたメッセージを、VOI
 ```
 voicevox-discord/
 ├── bot/
-│   ├── bot.py                ← Bot 本体
-│   ├── readings_builtin.py   ← built-in 読み辞書（JP/EN）
-│   ├── kaomoji_builtin.py    ← built-in 顔文字辞書
-│   ├── migrate.py            ← マイグレーションランナー
-│   ├── migrations/           ← 逐次適用される DB マイグレーション
+│   ├── bot.py                ← composition root / 既存互換レイヤ（2000行未満）
+│   ├── app/                  ← 起動・設定・DBプール・プロセス監督のみ
+│   │   ├── config.py
+│   │   ├── database.py
+│   │   └── launcher.py
+│   ├── features/             ← package by feature の本体
+│   │   ├── dictionary/
+│   │   │   ├── __init__.py
+│   │   │   ├── application.py
+│   │   │   ├── builtin_readings.py
+│   │   │   ├── builtin_kaomoji/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── actions.py
+│   │   │   │   ├── negative.py
+│   │   │   │   ├── positive.py
+│   │   │   │   ├── reactions.py
+│   │   │   │   ├── slang.py
+│   │   │   │   └── social.py
+│   │   │   ├── infrastructure.py
+│   │   │   └── text_processing.py
+│   │   ├── discord_bot/
+│   │   │   ├── commands.py
+│   │   │   ├── help.py
+│   │   │   ├── lifecycle.py
+│   │   │   ├── messages.py
+│   │   │   └── ui.py
+│   │   ├── internal_tts_api/
+│   │   │   └── aiohttp_adapter.py
+│   │   ├── license/
+│   │   │   ├── __init__.py
+│   │   │   ├── models.py
+│   │   │   ├── domain.py
+│   │   │   ├── presentation.py
+│   │   │   ├── test_domain.py
+│   │   │   └── test_presentation.py
+│   │   ├── panel/
+│   │   │   ├── __init__.py
+│   │   │   ├── models.py
+│   │   │   ├── presentation.py
+│   │   │   └── test_presentation.py
+│   │   ├── status/
+│   │   │   ├── __init__.py
+│   │   │   ├── models.py
+│   │   │   ├── presentation.py
+│   │   │   └── test_presentation.py
+│   │   ├── voice_playback/
+│   │   │   ├── application.py
+│   │   │   └── discord_adapter.py
+│   │   ├── voice_sessions/
+│   │   │   ├── discord_adapter.py
+│   │   │   └── infrastructure.py
+│   │   ├── voice_settings/
+│   │   │   └── infrastructure.py
+│   │   └── voice_synthesis/
+│   │       ├── application.py
+│   │       └── infrastructure.py
+│   ├── migrations/           ← DB マイグレーションと runner
+│   │   ├── runner.py
+│   │   └── 2026....py
 │   ├── Dockerfile            ← 本番用
 │   ├── Dockerfile.dev        ← 開発用 (watchdog ホットリロード)
 │   ├── requirements.txt      ← 本番依存
 │   ├── requirements.dev.txt  ← 開発追加依存
 │   └── tests/
 │       ├── conftest.py       ← テスト用環境変数
-│       └── test_bot.py       ← テスト
+│       └── test_bot.py       ← 既存互換・統合寄りの回帰テスト
 ├── voicevox/
 │   └── Dockerfile            ← VOICEVOX Engine ラッパー
 ├── docs/
 │   └── ARCHITECTURE.md       ← このファイル
 ├── docker-compose.yml          ← 共通ベース定義
 ├── docker-compose.override.yml ← ローカル開発用上書き (自動適用)
-├── pyproject.toml              ← ruff / pytest 設定
+├── pyproject.toml              ← ruff / pyright / pytest 設定
+├── pyright-pylance-strict.json ← Pylance 寄り strict 型チェック設定
 ├── .github/workflows/ci.yml   ← GitHub Actions CI
 ├── .env.example                ← 環境変数テンプレート
 ├── .gitignore
 └── .dockerignore
 ```
+
+## Package By Feature / Clean Architecture / コロケーションテスト
+
+このプロジェクトでは、[React のフォルダ構成、段階的に考えてみた ― Package by Feature から Clean Architecture まで](https://zenn.dev/yoshi333/articles/b25d7ff4915a57)
+の「Package by Feature を土台にし、複雑になった feature だけ層を導入する」考え方を、
+Python / Discord Bot 向けに読み替えて採用する。
+
+新規の利用者向け機能は、原則として `bot/features/<feature>/` に配置する。
+小さい feature は `models.py` と `presentation.py` 程度に留め、複雑化した feature だけ
+`domain.py`, `application.py`, `infrastructure.py` を追加する。最初から全 feature に同じ層を
+強制しない。
+
+- `bot.py` は composition root と既存互換 wrapper に限定し、2000行以上にしない。
+- Discord Bot であること、音声 Bot であること、内部 HTTP API であることも feature として扱う。
+  `discord_bot`, `voice_synthesis`, `voice_playback`, `internal_tts_api` のように名前を付けて分ける。
+- `app/` は feature ではない。起動設定、DB接続プール、プロセス監督など、feature を組み立てる
+  配線だけを置く。音声処理、Discord UI、SQL、辞書キャッシュを `app/` に置かない。
+- SQL は各 feature の `infrastructure.py` に置く。`dictionary` の SQL は `dictionary`、
+  `voice_settings` の SQL は `voice_settings`、`mutes` の SQL は `mutes` が所有する。
+- キャッシュはその振る舞いを所有する feature に置く。辞書置換キャッシュは `dictionary`、
+  合成キャッシュは `voice_synthesis` が所有する。
+- feature パッケージは Discord adapter から渡された snapshot を受け取り、利用者に見える
+  UI 表現を返す。これにより、feature 単体のテストでは Bot 起動や DB 接続を不要にする。
+- `bot/tests/test_bot.py` は移行期間の互換テストと統合寄りの回帰テストとして残す。
+- feature に名前を付けられるものは `shared` に逃がさない。読み辞書・顔文字辞書は
+  `dictionary` feature の責務とする。
+- 複数 feature から本当に再利用され、どの feature にも所有させにくい処理だけを
+  `shared` 化する。現時点では `shared/` を作らず、必要になるまで単一 feature 内に閉じ込める。
+- テストは実装の近くに置く。例: `domain.py` には `test_domain.py`、
+  `presentation.py` には `test_presentation.py` を同じ feature パッケージ内に置く。
+- テスト実行は `pytest bot` を標準にし、従来の `bot/tests` だけでなく
+  colocated test も CI で必ず収集する。
+- 型チェックは通常の `pyright` に加えて、Pylance 寄りの
+  `pyright --project pyright-pylance-strict.json` を CI で必ず実行する。
+
+### 読みやすさ / TypeScript 移植しやすさ
+
+Python 実装であっても、将来 TypeScript へ置き換える可能性を前提に、境界は
+「名前付きのデータ構造」と「明示的な関数」で表現する。
+
+- feature 境界では `dict[str, Any]` や module の暗黙参照ではなく、
+  `dataclass` / `Protocol` / `Mapping` など、TypeScript の `interface` に対応しやすい形を優先する。
+- `getattr`, `setattr`, `globals()`, `sys.modules[__name__]` は移行期の互換層に閉じ込める。
+  新規 feature へ広げない。
+- `bot.py` が一時的に runtime context として渡される場合も、呼び出し側では
+  `_runtime_context()` を使う。TypeScript 化ではここを `AppContext` の明示的なインスタンスへ置き換える。
+- feature が runtime context を受け取る場合は、可能な範囲で `Protocol` を定義する。
+  例: `ConfigContext`, `PlaybackStateContext`, `DiscordPlaybackContext`,
+  `InternalTtsApiContext` は TypeScript の `interface` へほぼ機械的に写せる形にしておく。
+- module 変数をまたいだ同期が必要な場合は、文字列で直接触らず、`TextProcessingRuntimeState`
+  のような名前付き DTO と import/export 関数を用意する。
+- 純粋な変換・判定は `domain.py` / `application.py` に寄せ、Discord / aiohttp / asyncpg 依存は
+  adapter / infrastructure に閉じ込める。これは TypeScript でも同じ層に移しやすい。
+
+### Feature 内の層
+
+| 層 | 役割 | 依存してよいもの |
+|---|---|---|
+| `models.py` | feature 内で受け渡すデータ構造。snapshot / DTO / 値オブジェクト | 標準ライブラリのみ |
+| `domain.py` | ビジネスルール、正規化、判定、純粋関数 | `models.py` |
+| `application.py` | 操作単位のユースケース。複数 domain 処理の組み合わせ | `models.py`, `domain.py` |
+| `infrastructure.py` | 外部 I/O。DB、HTTP、ファイル、外部 API との接続 | `models.py`、必要なら protocol |
+| `discord_adapter.py` / `aiohttp_adapter.py` | Discord や aiohttp など特定チャネルへの接続 | `application.py`, `infrastructure.py`, 外部ライブラリ |
+| `presentation.py` | Discord Embed / View 表示など利用者向け UI 表現 | `models.py`, `domain.py`, `application.py`, `discord` |
+| `__init__.py` | feature 外へ公開する API の再 export | 公開対象の層 |
+
+依存方向は内側から外側へ逆流させない。`domain.py` から `discord`, `asyncpg`, `aiohttp`,
+環境変数、`bot.py` のグローバル状態を参照しない。外部状態を読む必要がある場合は、
+`bot.py` で snapshot を作るか、`application.py` に必要な値を引数として渡す。
+
+### 現在の適用状況
+
+- `dictionary`: built-in 読み辞書、英単語読み、顔文字辞書、辞書置換キャッシュ、
+  `guild_dicts` / `builtin_reading_dicts` の SQL を所有。
+  顔文字辞書は機械的なファイルサイズ分割ではなく、読みの意味に基づく
+  `social`, `positive`, `negative`, `actions`, `slang`, `reactions` で分割する。
+- `discord_bot`: Discord の slash command handler、lifecycle、message adapter、help embed、View/Modal を所有。
+  Discord Bot であること自体を feature として扱う。
+- `internal_tts_api`: 内部向け aiohttp API を所有。HTTP入口は feature だが、合成自体は
+  `voice_synthesis` を呼び出す。
+- `license`: `models.py` にライセンス/クレジット用データ、`domain.py` に話者名正規化と
+  クレジット候補生成、`presentation.py` に Discord Embed 表示を配置。
+- `mutes`: 読み上げミュート判定と `guild_mutes` の SQL を所有。
+- `panel`: 現時点では表示 snapshot と Embed 生成のみなので、`models.py` と
+  `presentation.py` の Stage 2 相当で維持。
+- `status`: 公開してよい状態 snapshot と Embed 生成のみなので、`models.py` と
+  `presentation.py` の Stage 2 相当で維持。
+- `voice_playback`: 音声キュー、再生状態、Discord AudioSource 変換を所有。
+- `voice_sessions`: VCセッション永続化と Discord VC 復旧 adapter を所有。
+- `voice_settings`: ユーザー音声設定と `user_settings` の SQL を所有。
+- `voice_synthesis`: TTSエンジン候補選定、HTTP合成、合成キャッシュを所有。
 
 ## 技術スタック
 
@@ -72,13 +218,14 @@ voicevox-discord/
 | HTTP クライアント | aiohttp |
 | DB | PostgreSQL + asyncpg |
 | コンテナ | Docker Compose (ローカル / Coolify 本番) |
-| CI | GitHub Actions (ruff + pytest) |
+| CI | GitHub Actions (ruff + pyright + Pylance strict pyright + pytest) |
 | ホットリロード | watchdog (watchmedo) |
 
 ## スラッシュコマンド
 
 | コマンド | 説明 |
 |---|---|
+| `/panel` | 操作パネルを表示 |
 | `/join` | ユーザーがいるボイスチャンネルに接続 |
 | `/leave` | ボイスチャンネルから切断 |
 | `/vc` | VCに接続/切断をトグル |
@@ -89,6 +236,41 @@ voicevox-discord/
 | `/unmute <user>` | 指定ユーザーのミュートを解除 |
 | `/showmute` | ミュート中のユーザー一覧 |
 | `/dict` | ギルド辞書の設定（ボタン UI で追加・削除） |
+| `/status` | 接続状態・キュー・TTSエンジン状態を表示 |
+| `/license` | 音声ライセンスと規約リンクを表示 |
+| `/credit` | 現在の話者のクレジット候補を表示 |
+
+## UI / UX 方針
+
+- `/panel` を利用者の入口にし、接続、切断、スキップ、音声設定、話者変更、
+  辞書、状態確認、ライセンス確認へボタンで移動できるようにする。
+- 公開パネルやスラッシュコマンドには管理者向けデバッグ導線を置かない。
+  直近エラーや trace ID などの詳細調査情報は Bot 運営側ログでのみ扱う。
+- 接続、切断、スキップはそれぞれ独立したボタンにし、現在の接続・再生状態に応じて
+  押せない操作を disabled にする。
+- ボタン配置は「主操作」「個人設定」「確認・更新」に分け、危険操作である切断と
+  スキップは danger style にする。
+- 個人設定や状態確認は ephemeral 表示を基本とし、読み上げ対象チャンネルのノイズを抑える。
+- 話者変更はエンジン → キャラクター → スタイルの順で選択し、複数音声エンジン対応を
+  ユーザーに分かりやすく見せる。候補が多い場合は 25 件ずつページングする。
+- 辞書UIはページングと選択式削除を持ち、登録数が増えても操作しやすくする。
+
+## 運用・調査
+
+- ログは `event=... fields={...}` の形式でイベント名を固定し、検索しやすくする。
+- 主なログフィールドは `trace_id`, `guild_id`, `channel_id`, `user_id`,
+  `speaker_id`, `queue_length`, `latency_ms`, `error`。
+- `/status` は接続状態、読み上げ対象チャンネル、キュー長、話者数、
+  エンジン取得状態のみを表示する。
+- 直近エラー、trace ID、DB状態、Botインスタンスなどの内部情報は利用者向けUIに表示しない。
+
+## ライセンス・権利対応
+
+- `/license` で VOICEVOX / COEIROINK / SHAREVOX の公式URL・規約URL・表記例を表示する。
+- `/credit` で現在のユーザー設定に基づくクレジット候補を表示する。候補はエンジン名の
+  重複を避けるため、内部表示名の `[ENGINE]` 接頭辞を外して生成する。
+- Bot側の表示は案内であり、実際の利用可否・クレジット条件・禁止用途は
+  各公式サイトおよび各話者の規約を確認する。
 
 ## データ永続化
 
@@ -162,7 +344,7 @@ CREATE TABLE schema_migrations (
   - 登録時 (`add_dict_entry`): 単語+読みが built-in と完全一致する登録は拒否し、ephemeral で「ビルドインと完全一致するため登録不要（読みを変えれば登録可能）」を返す
   - 起動時 (`purge_builtin_duplicates_from_user_dicts`): 既存ユーザ辞書から built-in 完全一致エントリを一括削除。ビルドイン拡充への自動追従。失敗しても on_ready は止めない
   - 1文字でも違えば登録可（ユーザのオーバーライド意図を尊重）。英語キーは case-insensitive 比較
-- **CJK 互換単位記号の自動展開** ([readings_builtin.py](../bot/readings_builtin.py)):
+- **CJK 互換単位記号の自動展開** ([builtin_readings.py](../bot/features/dictionary/builtin_readings.py)):
   - U+3300–U+33FF の Squared Katakana words (㌔→キロ、㍉→ミリ、㍍→メートル等) は `unicodedata.NFKC` で自動生成
   - Latin に分解されるもの (㎐→Hz、㎏→kg 等) は TTS engine 依存を避けるため、`_CJK_COMPAT_LATIN_UNIT_READINGS` で日本語カナ表記を手書き登録（ヘルツ/キログラム/ヘクタール等 約77件）
 - **ネット略語の正規化方針**:
@@ -173,7 +355,7 @@ CREATE TABLE schema_migrations (
 
 `on_ready` では以下の順で初期化を実施する。
 
-1. （`RUN_DB_MIGRATIONS=1` の時のみ）`migrate.py` で未適用マイグレーションを実行（`schema_migrations` 管理）
+1. （`RUN_DB_MIGRATIONS=1` の時のみ）`migrations/runner.py` で未適用マイグレーションを実行（`schema_migrations` 管理）
 2. `init_db` で必要テーブルを保証
 3. `load_builtin_reading_dicts` で built-in 辞書を DB + デフォルトから再構築
 4. ユーザー設定・ギルド辞書・ミュートをメモリへロード
@@ -333,6 +515,6 @@ COEIROINK と併用する場合は `COMPOSE_PROFILES=coeiroink,sharevox` にす�
 
 各ボイスおよびライセンスはこちら:
 
-- VOICEVOX: https://voicevox.hiroshiba.jp/
-- COEIROINK: https://coeiroink.com/
+- VOICEVOX: https://voicevox.hiroshiba.jp/ / https://voicevox.hiroshiba.jp/term/
+- COEIROINK: https://coeiroink.com/ / https://coeiroink.com/terms
 - SHAREVOX: https://sharevox.app/

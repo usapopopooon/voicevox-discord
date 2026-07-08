@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Seed builtin_reading_dicts from current built-in dictionaries.
+"""現在の built-in 辞書から builtin_reading_dicts を seed する。
 
-Usage:
-  DATABASE_URL=... python bot/migrations/20260419_seed_builtin_reading_dicts.py
+使用例:
+  実行: DATABASE_URL=... python bot/migrations/20260419_seed_builtin_reading_dicts.py
 
-This migration is idempotent:
-- Existing rows are preserved.
-- Missing rows are inserted with ON CONFLICT DO NOTHING.
+この migration は冪等:
+- 既存行は保持する。
+- 不足行だけを ON CONFLICT DO NOTHING で挿入する。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ async def main() -> None:
     if not database_url:
         raise RuntimeError("DATABASE_URL is required")
 
-    # Ensure `import bot` resolves to bot/bot.py when run from repo root.
+    # repo root から実行した時に `import bot` が bot/bot.py を指すようにする。
     script_dir = Path(__file__).resolve().parent
     bot_dir = script_dir.parent
     if str(bot_dir) not in sys.path:
