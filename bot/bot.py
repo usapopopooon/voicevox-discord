@@ -284,6 +284,17 @@ intents.auto_moderation = False
 # 共有 HTTP セッション（Keep-Alive で接続再利用）
 _http_session: aiohttp.ClientSession | None = None
 
+# VC 切断復旧用の runtime 状態。永続化された active_voice_sessions と組み合わせ、
+# deploy や Discord gateway 復帰時は再接続し、パネル操作の切断は復帰しない。
+_restored_voice_sessions = False
+_shutting_down = False
+_self_voice_recovery_tasks: dict[int, asyncio.Task[None]] = {}
+_ready_voice_restore_task: asyncio.Task[None] | None = None
+_last_gateway_recoverable_disconnect_at: float | None = None
+_last_user_requested_disconnect_at_by_guild: dict[int, float] = {}
+_gateway_recoverable_disconnect_log_handler: logging.Handler | None = None
+_gateway_recoverable_disconnect_loggers: tuple[logging.Logger, ...] = ()
+
 
 async def get_http_session() -> aiohttp.ClientSession:
     """共有 ClientSession を返す（未作成/クローズ済みなら新規作成）"""
@@ -304,6 +315,13 @@ async def close_http_session():
 class TtsClient(discord.Client):
     """discord.Client のサブクラス。終了時に共有 HTTP セッションも閉じる。"""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """gateway 復旧ログの監視を取り付けて Discord client を初期化する。"""
+        super().__init__(*args, **kwargs)
+        voice_sessions_discord_adapter.install_gateway_recoverable_disconnect_log_handler(
+            _runtime_context()
+        )
+
     async def setup_hook(self) -> None:
         """gateway 接続前に、再起動後も受けたい persistent view を登録する。"""
         register_persistent_views()
@@ -312,9 +330,15 @@ class TtsClient(discord.Client):
         # discord.py の close は gateway だけを見るため、Bot が別途持つ
         # aiohttp server/client をここで一緒に閉じる。終了順序を逆にすると、
         # 停止中に内部 API が合成リクエストを受ける可能性がある。
-        await stop_internal_tts_api()
-        await close_http_session()
-        await super().close()
+        voice_sessions_discord_adapter.begin_shutdown(_runtime_context())
+        voice_sessions_discord_adapter.uninstall_gateway_recoverable_disconnect_log_handler(
+            _runtime_context()
+        )
+        try:
+            await stop_internal_tts_api()
+            await close_http_session()
+        finally:
+            await super().close()
 
 
 # chunk_guilds_at_startup=False: 起動時に全ギルドのメンバーを一括キャッシュしない
@@ -1003,6 +1027,41 @@ async def _safe_record_voice_session(
     )
 
 
+def _record_gateway_recoverable_disconnect() -> None:
+    """Discord gateway の復旧対象切断を記録する。"""
+    voice_sessions_discord_adapter.record_gateway_recoverable_disconnect(
+        _runtime_context()
+    )
+
+
+def _record_user_requested_disconnect(guild_id: int) -> None:
+    """パネル/コマンドからの意図的な VC 切断を記録する。"""
+    voice_sessions_discord_adapter.record_user_requested_disconnect(
+        _runtime_context(), guild_id
+    )
+
+
+def _has_recent_gateway_recoverable_disconnect() -> bool:
+    """直近に gateway 起因の復旧対象切断があったかを返す。"""
+    return voice_sessions_discord_adapter.has_recent_gateway_recoverable_disconnect(
+        _runtime_context()
+    )
+
+
+def _has_recent_user_requested_disconnect(guild_id: int) -> bool:
+    """直近にユーザー操作で同 guild の VC 切断を要求していたかを返す。"""
+    return voice_sessions_discord_adapter.has_recent_user_requested_disconnect(
+        _runtime_context(), guild_id
+    )
+
+
+def _schedule_delayed_voice_session_restore() -> None:
+    """gateway ready 再発火後の遅延 VC session 復旧を予約する。"""
+    voice_sessions_discord_adapter.schedule_delayed_voice_session_restore(
+        _runtime_context()
+    )
+
+
 async def _restore_voice_sessions_on_startup() -> None:
     """voice-session feature 経由で記録済み VC session を復旧する。"""
     await voice_sessions_discord_adapter.restore_voice_sessions_on_startup(
@@ -1540,6 +1599,11 @@ def _mark_dynamic_runtime_exports() -> None:
         _reconnect_vc,
         _safe_forget_voice_session,
         _safe_record_voice_session,
+        _record_gateway_recoverable_disconnect,
+        _record_user_requested_disconnect,
+        _has_recent_gateway_recoverable_disconnect,
+        _has_recent_user_requested_disconnect,
+        _schedule_delayed_voice_session_restore,
         _restore_voice_sessions_on_startup,
         _make_audio_source,
         make_playback_audio_source,

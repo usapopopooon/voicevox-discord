@@ -415,6 +415,16 @@ def mock_on_ready_deps(monkeypatch):
     monkeypatch.setattr(bot, "load_guild_dicts", AsyncMock())
     monkeypatch.setattr(bot, "load_guild_mutes", AsyncMock())
     monkeypatch.setattr(bot, "fetch_speakers", AsyncMock())
+    restore_mock = AsyncMock()
+    schedule_mock = MagicMock()
+    has_recent_gateway_mock = MagicMock(return_value=False)
+    monkeypatch.setattr(bot, "_restore_voice_sessions_on_startup", restore_mock)
+    monkeypatch.setattr(bot, "_schedule_delayed_voice_session_restore", schedule_mock)
+    monkeypatch.setattr(
+        bot,
+        "_has_recent_gateway_recoverable_disconnect",
+        has_recent_gateway_mock,
+    )
 
     tree_mock = MagicMock()
     tree_mock.sync = AsyncMock()
@@ -427,6 +437,11 @@ def mock_on_ready_deps(monkeypatch):
 
     monkeypatch.setattr(bot, "_migrations_ran", False)
     monkeypatch.setattr(bot, "_persistent_views_registered", False)
+    monkeypatch.setattr(bot, "_restored_voice_sessions", False)
+    monkeypatch.setattr(bot, "_ready_voice_restore_task", None)
+    run_mock.restore_voice_sessions = restore_mock
+    run_mock.schedule_delayed_restore = schedule_mock
+    run_mock.has_recent_gateway_disconnect = has_recent_gateway_mock
     return run_mock
 
 
@@ -462,6 +477,116 @@ class TestOnReadyMigrationFlag:
         bot.client.add_view.assert_called_once()
         view = bot.client.add_view.call_args.args[0]
         assert view.timeout is None
+
+    async def test_restores_voice_sessions_once_across_reconnects(
+        self, mock_on_ready_deps, monkeypatch
+    ):
+        import asyncio as asyncio_mod
+
+        import bot
+
+        monkeypatch.setattr(bot, "RUN_DB_MIGRATIONS", False)
+        await bot.on_ready()
+        await bot.on_ready()
+        await asyncio_mod.sleep(0)
+
+        mock_on_ready_deps.restore_voice_sessions.assert_awaited_once()
+
+    async def test_schedules_delayed_restore_after_gateway_recoverable_ready(
+        self, mock_on_ready_deps, monkeypatch
+    ):
+        import bot
+
+        monkeypatch.setattr(bot, "RUN_DB_MIGRATIONS", False)
+        monkeypatch.setattr(bot, "_restored_voice_sessions", True)
+        mock_on_ready_deps.has_recent_gateway_disconnect.return_value = True
+
+        await bot.on_ready()
+
+        mock_on_ready_deps.schedule_delayed_restore.assert_called_once()
+
+
+class TestGatewayRecoverableDisconnectLogHandler:
+    def test_records_5xx_gateway_error(self, monkeypatch):
+        import logging
+
+        import bot
+
+        class GatewayError(Exception):
+            """status を持つ Discord gateway error のテスト用代替。"""
+
+        error = GatewayError("server error")
+        error.status = 503
+        record = logging.LogRecord(
+            "discord.client",
+            logging.ERROR,
+            __file__,
+            1,
+            "gateway failed",
+            (),
+            None,
+        )
+        record.exc_info = (GatewayError, error, None)
+        monkeypatch.setattr(bot, "_last_gateway_recoverable_disconnect_at", None)
+        adapter = bot.voice_sessions_discord_adapter
+        handler_cls = adapter.DiscordGatewayRecoverableDisconnectLogHandler
+        handler = handler_cls(bot._record_gateway_recoverable_disconnect)
+
+        handler.emit(record)
+
+        assert bot._last_gateway_recoverable_disconnect_at is not None
+
+    def test_records_session_invalidation(self, monkeypatch):
+        import logging
+
+        import bot
+
+        record = logging.LogRecord(
+            "discord.gateway",
+            logging.INFO,
+            __file__,
+            1,
+            "session has been invalidated",
+            (),
+            None,
+        )
+        monkeypatch.setattr(bot, "_last_gateway_recoverable_disconnect_at", None)
+        adapter = bot.voice_sessions_discord_adapter
+        handler_cls = adapter.DiscordGatewayRecoverableDisconnectLogHandler
+        handler = handler_cls(bot._record_gateway_recoverable_disconnect)
+
+        handler.emit(record)
+
+        assert bot._last_gateway_recoverable_disconnect_at is not None
+
+    def test_ignores_non_5xx_gateway_error(self, monkeypatch):
+        import logging
+
+        import bot
+
+        class GatewayError(Exception):
+            """status を持つ Discord gateway error のテスト用代替。"""
+
+        error = GatewayError("client error")
+        error.status = 400
+        record = logging.LogRecord(
+            "discord.client",
+            logging.ERROR,
+            __file__,
+            1,
+            "gateway failed",
+            (),
+            None,
+        )
+        record.exc_info = (GatewayError, error, None)
+        monkeypatch.setattr(bot, "_last_gateway_recoverable_disconnect_at", None)
+        adapter = bot.voice_sessions_discord_adapter
+        handler_cls = adapter.DiscordGatewayRecoverableDisconnectLogHandler
+        handler = handler_cls(bot._record_gateway_recoverable_disconnect)
+
+        handler.emit(record)
+
+        assert bot._last_gateway_recoverable_disconnect_at is None
 
 
 class TestPlayNext:
@@ -3259,10 +3384,8 @@ class TestOnVoiceStateUpdate:
     ):
         """一時切断 (Discord WS 4006 等) で discord.py が auto-reconnect する
         ケースに備え、`read_channels` は保持し queue/locks のみクリアする。
-        DB session は即座に削除（auto-reconnect 時に再記録される設計）。
+        DB session は即座に削除せず、復旧 task 側で切断理由を判定する。
         """
-        import asyncio as asyncio_mod
-
         import bot
         from bot import (
             client,
@@ -3278,6 +3401,7 @@ class TestOnVoiceStateUpdate:
 
         forget_mock = AsyncMock()
         monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
+        monkeypatch.setattr(bot, "_self_voice_recovery_tasks", {})
 
         member = MagicMock()
         member.bot = True
@@ -3300,15 +3424,160 @@ class TestOnVoiceStateUpdate:
             assert 5005 not in engine_error_notified_at
             # read_channels は保持 (auto-reconnect 後の TTS 継続用)
             assert read_channels[5005] == 100
-            # spawn された _safe_forget_voice_session が完了するのを待つ
-            await asyncio_mod.sleep(0)
-            forget_mock.assert_awaited_once_with(5005)
+            forget_mock.assert_not_awaited()
+            assert 5005 in bot._self_voice_recovery_tasks
         finally:
+            for task in bot._self_voice_recovery_tasks.values():
+                task.cancel()
+            bot._self_voice_recovery_tasks.clear()
             client._connection.user = original_user
             queues.pop(5005, None)
             read_channels.pop(5005, None)
             play_locks.pop(5005, None)
             engine_error_notified_at.pop(5005, None)
+
+    async def test_user_requested_self_disconnect_forgets_session(self, monkeypatch):
+        """パネル/コマンドで切断した直後の自己切断は復旧せず session を消す。"""
+        import bot
+        from bot import client, on_voice_state_update, queues, read_channels
+
+        original_user = client._connection.user
+        client._connection.user = MagicMock(id=4242)
+        monkeypatch.setattr(bot, "_self_voice_recovery_tasks", {})
+        monkeypatch.setattr(bot, "_last_user_requested_disconnect_at_by_guild", {})
+        monkeypatch.setattr(bot, "_last_gateway_recoverable_disconnect_at", None)
+        monkeypatch.setattr(
+            bot.voice_sessions_discord_adapter,
+            "SELF_VOICE_RECOVERY_INITIAL_DELAY_SECONDS",
+            0.0,
+        )
+        monkeypatch.setattr(
+            bot.voice_sessions_discord_adapter,
+            "SELF_VOICE_RECOVERY_TIMEOUT_SECONDS",
+            0.0,
+        )
+
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
+
+        member = MagicMock()
+        member.bot = True
+        member.id = 4242
+        member.guild.id = 5006
+        member.guild.voice_client = None
+        member.guild.audit_logs = None
+        before = MagicMock()
+        before.channel = MagicMock()
+        before.channel.id = 7006
+        after = MagicMock()
+        after.channel = None
+
+        queues[5006] = deque([b"audio"])
+        read_channels[5006] = 8006
+        bot._record_user_requested_disconnect(5006)
+        try:
+            await on_voice_state_update(member, before, after)
+            recovery_task = bot._self_voice_recovery_tasks[5006]
+            await recovery_task
+            forget_mock.assert_awaited_once_with(5006)
+            assert 5006 not in queues
+            assert 5006 not in read_channels
+        finally:
+            client._connection.user = original_user
+            bot._self_voice_recovery_tasks.clear()
+            queues.pop(5006, None)
+            read_channels.pop(5006, None)
+
+    async def test_recoverable_self_disconnect_reconnects_saved_session(
+        self, monkeypatch
+    ):
+        """復旧対象の自己切断は session を消さず保存先 VC へ戻す。"""
+        import bot
+        from bot import client, on_voice_state_update, read_channels
+
+        original_user = client._connection.user
+        client._connection.user = MagicMock(id=4242)
+        monkeypatch.setattr(bot, "_self_voice_recovery_tasks", {})
+        monkeypatch.setattr(bot, "_last_user_requested_disconnect_at_by_guild", {})
+        monkeypatch.setattr(bot, "_last_gateway_recoverable_disconnect_at", None)
+        monkeypatch.setattr(
+            bot.voice_sessions_discord_adapter,
+            "SELF_VOICE_RECOVERY_INITIAL_DELAY_SECONDS",
+            0.0,
+        )
+        monkeypatch.setattr(
+            bot.voice_sessions_discord_adapter,
+            "SELF_VOICE_RECOVERY_TIMEOUT_SECONDS",
+            0.0,
+        )
+
+        reconnect_mock = AsyncMock()
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
+
+        member = MagicMock()
+        member.bot = True
+        member.id = 4242
+        member.guild.id = 5007
+        member.guild.voice_client = None
+        member.guild.audit_logs = None
+        before = MagicMock()
+        before.channel = MagicMock()
+        before.channel.id = 7007
+        after = MagicMock()
+        after.channel = None
+
+        read_channels[5007] = 8007
+        try:
+            await on_voice_state_update(member, before, after)
+            recovery_task = bot._self_voice_recovery_tasks[5007]
+            await recovery_task
+            reconnect_mock.assert_awaited_once_with(5007, 7007, 8007)
+            forget_mock.assert_not_awaited()
+            assert read_channels[5007] == 8007
+        finally:
+            client._connection.user = original_user
+            bot._self_voice_recovery_tasks.clear()
+            read_channels.pop(5007, None)
+
+    async def test_shutdown_self_disconnect_does_not_forget_or_schedule(
+        self, monkeypatch
+    ):
+        """終了処理中の自己切断は deploy 復旧用 session を温存する。"""
+        import bot
+        from bot import client, on_voice_state_update, queues, read_channels
+
+        original_user = client._connection.user
+        client._connection.user = MagicMock(id=4242)
+        monkeypatch.setattr(bot, "_self_voice_recovery_tasks", {})
+        monkeypatch.setattr(bot, "_shutting_down", True)
+
+        forget_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
+
+        member = MagicMock()
+        member.bot = True
+        member.id = 4242
+        member.guild.id = 5008
+        before = MagicMock()
+        before.channel = MagicMock()
+        after = MagicMock()
+        after.channel = None
+
+        queues[5008] = deque([b"audio"])
+        read_channels[5008] = 8008
+        try:
+            await on_voice_state_update(member, before, after)
+            forget_mock.assert_not_awaited()
+            assert bot._self_voice_recovery_tasks == {}
+            assert list(queues[5008]) == [b"audio"]
+            assert read_channels[5008] == 8008
+        finally:
+            client._connection.user = original_user
+            bot._shutting_down = False
+            queues.pop(5008, None)
+            read_channels.pop(5008, None)
 
     async def test_bot_reconnect_re_records_voice_session(self, monkeypatch):
         """auto-reconnect 成功時は切断時に消した DB session を再記録する。"""

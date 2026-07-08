@@ -43,6 +43,12 @@ async def on_ready(ctx: Any) -> None:
     except Exception as e:
         ctx.logger.warning(f"内部TTS APIの起動に失敗: {e}")
 
+    if not ctx._restored_voice_sessions:
+        ctx._restored_voice_sessions = True
+        ctx._spawn_background(ctx._restore_voice_sessions_on_startup())
+    elif ctx._has_recent_gateway_recoverable_disconnect():
+        ctx._schedule_delayed_voice_session_restore()
+
 
 async def on_guild_remove(ctx: Any, guild: discord.Guild) -> None:
     """Bot が guild から退出した後にインメモリ状態を解放する。"""

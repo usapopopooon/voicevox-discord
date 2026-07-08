@@ -364,13 +364,16 @@ CREATE TABLE schema_migrations (
 
 ### VC セッション復旧
 
-デプロイ・プロセス再起動後に元の VC へ自動復帰する。**ランタイム切断（モデレータ手動切断・ネットワーク断・権限剥奪等）は復旧対象外** とし、ユーザーが必要なら `/panel` から再接続する設計。これにより audit log 権限要件や false-positive 復帰を回避する。
+デプロイ・プロセス再起動後に元の VC へ自動復帰する。さらに `bgm-bot` と同じ考え方で、Discord gateway の一時障害や deploy 中の自己切断は復旧対象として扱い、パネル/コマンド操作や audit log 上の手動切断は復旧しない。誤復帰を避けるため、自己切断時に即 DB を消すのではなく、短時間だけ auto-reconnect を待ってから切断理由を分類する。
 
 - パネルの接続成功時に `active_voice_sessions` へ UPSERT、パネルの切断、全員退出、Bot がギルドから外れる時は DELETE
-- 起動時: `on_ready` 末尾で `_spawn_background(_restore_voice_sessions_on_startup())` を発火し、全 session を順次（並列度1で rate limit 安全側）に再接続
-- ランタイム切断（`on_voice_state_update` で Bot 自身が VC から外れた）: `_cleanup_guild_playback_state` で queue/locks のみクリアし `read_channels` は保持（discord.py auto-reconnect 後の TTS 継続用）。**DB session は即座に `_safe_forget_voice_session` で削除**（手動切断/kick の場合は次起動時の意図しない rejoin を防ぐ）
-- ランタイム再接続（`on_voice_state_update` で Bot が VC へ復帰）: `_safe_record_voice_session` で DB session を**再記録**する。これにより一時的ネットワーク断（WS 4006 等）で discord.py が auto-reconnect した場合、削除した DB session を再び記録し、後続のプロセス再起動時にも `_restore_voice_sessions_on_startup` で復帰できる。`read_channels` が無い場合（切断後等）は再記録しない
-- **手動切断/kick の動作**: discord.py は auto-reconnect しないため再接続イベント発火なし → 切断時に削除された DB session が空のまま → 次起動時 restore 対象外 → bot は VC に戻らない
+- 起動時: `on_ready` 末尾で `_spawn_background(_restore_voice_sessions_on_startup())` を 1 回だけ発火し、全 session を順次（並列度1で rate limit 安全側）に再接続
+- gateway 復帰時: `discord.client` / `discord.gateway` の 5xx と `session has been invalidated` を検出し、次の `on_ready` で少し待ってから `_restore_voice_sessions_on_startup` を再実行する。Discord 側の voice state が落ち着く前に接続し直す race を避けるため遅延 task にしている
+- ランタイム切断（`on_voice_state_update` で Bot 自身が VC から外れた）: `_cleanup_guild_playback_state` で queue/locks のみクリアし `read_channels` は保持（discord.py auto-reconnect 後の TTS 継続用）。DB session は即削除せず `_self_voice_recovery_tasks` で guild 単位に復旧判定を走らせる
+- auto-reconnect 成功時: 復帰済み `voice_client` を検出したら queue を作り直し、`read_channels` と `active_voice_sessions` を再反映する。`read_channels` が無い場合は DB session から text channel を補う
+- 復旧対象切断: パネル/コマンド由来の `_record_user_requested_disconnect` が直近になく、gateway 復旧対象ログがある、または audit log で手動切断と判定できない場合は保存 session へ `_reconnect_vc` で復旧する。audit log 権限が無い場合は deploy/network 側に倒して session を温存する
+- **手動切断/kick の動作**: 直近のユーザー操作、または `member_disconnect` audit log（count=1、短時間内）を検出した場合は `_safe_forget_voice_session` と `_cleanup_guild_state` で session を削除し、次起動時 restore 対象外にする
+- **graceful deploy の動作**: `TtsClient.close()` で `_shutting_down=True` を立て、終了処理中の自己 VC 切断は無視する。DB session を消さないため、次起動時 `_restore_voice_sessions_on_startup` で復帰できる
 - **プロセス即死（deploy/crash）の動作**: `on_voice_state_update` が発火する前に process が消えるため DB session 削除は走らない → DB に session 残存 → 次起動時 `_restore_voice_sessions_on_startup` で復帰
 - 起動時 restore は接続前に以下をチェックし、満たさなければ復旧せず DB から session 削除:
     - **VC が存在する**（削除されていない・型が VoiceChannel）

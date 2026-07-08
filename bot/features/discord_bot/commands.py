@@ -241,6 +241,7 @@ async def leave(
     if ctx._has_active_voice_connection(guild):
         if panel_response == "update":
             await interaction.response.defer()
+        ctx._record_user_requested_disconnect(guild.id)
         try:
             await ctx.forget_voice_session(guild.id)
         except Exception as e:
@@ -282,6 +283,7 @@ async def vc_toggle(ctx: Any, interaction: discord.Interaction) -> None:
         return
 
     if ctx._has_active_voice_connection(guild):
+        ctx._record_user_requested_disconnect(guild.id)
         try:
             await ctx.forget_voice_session(guild.id)
         except Exception as e:
