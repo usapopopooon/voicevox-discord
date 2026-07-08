@@ -266,11 +266,14 @@ class DictDeleteModal(ui.Modal, title="辞書から削除"):
 # --- 操作パネル / 設定 UI ---
 
 
-def build_panel_embed(guild: discord.Guild) -> discord.Embed:
+def build_panel_embed(
+    guild: discord.Guild, *, notice: str | None = None
+) -> discord.Embed:
     """runtime state を集めて control-panel embed を描画する。
 
     引数:
         guild: panel state を表示する Discord guild。
+        notice: 接続完了など、その投稿だけに先頭表示する短い案内。
 
     戻り値:
         panel feature が生成した Discord embed。
@@ -287,7 +290,9 @@ def build_panel_embed(guild: discord.Guild) -> discord.Embed:
             read_channel_id=_ctx().read_channels.get(guild.id),
             queue_length=len(_ctx().queues.get(guild.id, [])),
             queue_maxlen=_ctx().QUEUE_MAXLEN,
+            license_lines=_ctx()._panel_license_lines(),
         ),
+        notice=notice,
     )
 
 
@@ -672,10 +677,7 @@ def build_speaker_picker_embed(
     if page is not None and total_pages is not None and total_pages > 1:
         lines.append(f"{page_label}: {page + 1}/{total_pages}ページ")
     if engine_name and len(characters_for_engine(engine_name)) > 25:
-        lines.append(
-            "候補が多いため、25件ずつ表示しています。"
-            "詳細検索は `/speaker` を利用してください。"
-        )
+        lines.append("候補が多いため、25件ずつ表示しています。")
     return discord.Embed(
         title="読み上げキャラクター変更",
         description="\n".join(lines),
@@ -845,31 +847,36 @@ class SpeakerStylePageButton(ui.Button["SpeakerStyleView"]):
 
 async def refresh_panel_message(
     interaction: discord.Interaction, guild: discord.Guild
-) -> None:
-    """操作後、元のパネルメッセージがあれば最新状態へ更新する。"""
+) -> bool:
+    """操作後、元のパネルメッセージを最新状態へ更新できたか返す。"""
     message = getattr(interaction, "message", None)
     edit = getattr(message, "edit", None)
     if not callable(edit):
-        return
+        return False
     try:
         result = edit(embed=build_panel_embed(guild), view=ControlPanelView(guild))
         if inspect.isawaitable(result):
             await result
+        return True
     except Exception as e:
         _ctx().logger.debug(f"操作パネルの更新に失敗: {e}")
+        return False
 
 
 class ControlPanelView(ui.View):
     """読み上げ Bot のよく使う操作をまとめた公開 control panel。"""
 
-    def __init__(self, guild: discord.Guild):
-        """panel button を作り、現在不可能な操作を disabled にする。
+    def __init__(self, guild: discord.Guild | None = None):
+        """panel button を作り、guild があれば現在不可能な操作を disabled にする。
 
         引数:
             guild: button availability を決める voice state を持つ guild。
+                永続 view 登録時は未指定にし、callback 側で guild を解決する。
         """
-        super().__init__(timeout=300)
-        self.guild_id = guild.id
+        super().__init__(timeout=None)
+        self.guild_id = guild.id if guild is not None else None
+        if guild is None:
+            return
         vc = _ctx()._as_voice_client(guild.voice_client)
         connected = vc is not None and _ctx()._is_vc_connected(vc)
         playing = vc is not None and _ctx()._is_vc_playing(vc)
@@ -904,8 +911,7 @@ class ControlPanelView(ui.View):
             )
             await refresh_panel_message(interaction, guild)
             return
-        await discord_bot_commands.join(_ctx(), interaction)
-        await refresh_panel_message(interaction, guild)
+        await discord_bot_commands.join(_ctx(), interaction, panel_response="update")
 
     @ui.button(
         label="切断",
@@ -929,8 +935,7 @@ class ControlPanelView(ui.View):
             )
             await refresh_panel_message(interaction, guild)
             return
-        await discord_bot_commands.leave(_ctx(), interaction)
-        await refresh_panel_message(interaction, guild)
+        await discord_bot_commands.leave(_ctx(), interaction, panel_response="update")
 
     @ui.button(
         label="スキップ",
@@ -954,10 +959,14 @@ class ControlPanelView(ui.View):
             )
             await refresh_panel_message(interaction, guild)
             return
-        await discord_bot_commands.skip(_ctx(), interaction)
-        await refresh_panel_message(interaction, guild)
+        await discord_bot_commands.skip(_ctx(), interaction, panel_response="update")
 
-    @ui.button(label="話者変更", style=discord.ButtonStyle.primary, row=1)
+    @ui.button(
+        label="話者変更",
+        style=discord.ButtonStyle.primary,
+        custom_id="panel:speaker",
+        row=1,
+    )
     async def speaker_button(
         self, interaction: discord.Interaction, button: DiscordButton
     ):
@@ -975,7 +984,12 @@ class ControlPanelView(ui.View):
             ephemeral=True,
         )
 
-    @ui.button(label="音声設定", style=discord.ButtonStyle.secondary, row=1)
+    @ui.button(
+        label="音声設定",
+        style=discord.ButtonStyle.secondary,
+        custom_id="panel:voice",
+        row=1,
+    )
     async def voice_button(
         self, interaction: discord.Interaction, button: DiscordButton
     ):
@@ -990,7 +1004,12 @@ class ControlPanelView(ui.View):
             ephemeral=True,
         )
 
-    @ui.button(label="辞書", style=discord.ButtonStyle.secondary, row=1)
+    @ui.button(
+        label="辞書",
+        style=discord.ButtonStyle.secondary,
+        custom_id="panel:dict",
+        row=1,
+    )
     async def dict_button(
         self, interaction: discord.Interaction, button: DiscordButton
     ):
@@ -1001,7 +1020,12 @@ class ControlPanelView(ui.View):
         content, view = build_dict_message(guild.id)
         await _ctx()._respond(interaction, content=content, view=view, ephemeral=True)
 
-    @ui.button(label="状態", style=discord.ButtonStyle.secondary, row=2)
+    @ui.button(
+        label="状態",
+        style=discord.ButtonStyle.secondary,
+        custom_id="panel:status",
+        row=2,
+    )
     async def status_button(
         self, interaction: discord.Interaction, button: DiscordButton
     ):
@@ -1015,7 +1039,12 @@ class ControlPanelView(ui.View):
             ephemeral=True,
         )
 
-    @ui.button(label="ライセンス", style=discord.ButtonStyle.secondary, row=2)
+    @ui.button(
+        label="ライセンス",
+        style=discord.ButtonStyle.secondary,
+        custom_id="panel:license",
+        row=2,
+    )
     async def panel_license_button(
         self, interaction: discord.Interaction, button: DiscordButton
     ):
@@ -1031,16 +1060,30 @@ class ControlPanelView(ui.View):
             ephemeral=True,
         )
 
-    @ui.button(label="ヘルプ", style=discord.ButtonStyle.secondary, row=2)
-    async def help_button(
+    @ui.button(
+        label="新規投稿",
+        style=discord.ButtonStyle.secondary,
+        custom_id="panel:repost",
+        row=2,
+    )
+    async def repost_button(
         self, interaction: discord.Interaction, button: DiscordButton
     ):
-        """panel から command help を private に表示する。"""
-        await _ctx()._respond(
-            interaction, embed=_ctx()._build_help_embed(), ephemeral=True
+        """現在の状態で新しい公開 panel message を投稿する。"""
+        guild = await _ctx()._require_guild_interaction(interaction)
+        if guild is None:
+            return
+        await interaction.response.send_message(
+            embed=build_panel_embed(guild),
+            view=ControlPanelView(guild),
         )
 
-    @ui.button(label="更新", style=discord.ButtonStyle.secondary, row=2)
+    @ui.button(
+        label="更新",
+        style=discord.ButtonStyle.secondary,
+        custom_id="panel:refresh",
+        row=2,
+    )
     async def refresh_button(
         self, interaction: discord.Interaction, button: DiscordButton
     ):

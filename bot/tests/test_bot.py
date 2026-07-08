@@ -422,9 +422,11 @@ def mock_on_ready_deps(monkeypatch):
 
     client_mock = MagicMock()
     client_mock.user.id = 1
+    client_mock.add_view = MagicMock()
     monkeypatch.setattr(bot, "client", client_mock)
 
     monkeypatch.setattr(bot, "_migrations_ran", False)
+    monkeypatch.setattr(bot, "_persistent_views_registered", False)
     return run_mock
 
 
@@ -447,6 +449,19 @@ class TestOnReadyMigrationFlag:
         await bot.on_ready()
         await bot.on_ready()
         mock_on_ready_deps.assert_called_once()
+
+    async def test_registers_persistent_panel_view_once(
+        self, mock_on_ready_deps, monkeypatch
+    ):
+        import bot
+
+        monkeypatch.setattr(bot, "RUN_DB_MIGRATIONS", False)
+        await bot.on_ready()
+        await bot.on_ready()
+
+        bot.client.add_view.assert_called_once()
+        view = bot.client.add_view.call_args.args[0]
+        assert view.timeout is None
 
 
 class TestPlayNext:
@@ -1048,7 +1063,7 @@ class TestOnMessage:
         message.guild.id = 111
         message.guild.voice_client.is_connected.return_value = True
         message.channel.id = 999
-        read_channels[111] = 888  # /joinしたチャンネルは別
+        read_channels[111] = 888  # 接続時に記録したチャンネルは別
         await on_message(message)
         # synthesizeが呼ばれないことを確認（エラーなく終了）
         read_channels.pop(111, None)
@@ -2219,6 +2234,20 @@ class TestPanelStatusLicenseCommands:
         assert buttons["panel:disconnect"].disabled is True
         assert buttons["panel:skip"].disabled is True
         assert "管理者デバッグ" not in labels
+        assert "ヘルプ" not in labels
+        assert "新規投稿" in labels
+
+    async def test_panel_view_is_persistent_and_has_stable_custom_ids(self):
+        import bot
+
+        view = bot.ControlPanelView()
+        buttons = [
+            child for child in view.children if isinstance(child, discord.ui.Button)
+        ]
+
+        assert view.timeout is None
+        assert buttons
+        assert all(button.custom_id for button in buttons)
 
     async def test_panel_view_enables_disconnect_and_skip_when_playing(self):
         import bot
@@ -2257,6 +2286,157 @@ class TestPanelStatusLicenseCommands:
         assert buttons["panel:connect"].disabled is True
         assert buttons["panel:disconnect"].disabled is False
         assert buttons["panel:skip"].disabled is True
+
+    async def test_panel_connect_updates_existing_panel_without_reposting(self):
+        import bot
+
+        interaction = _make_interaction(guild_id=9921, user_id=9922)
+        interaction.message = MagicMock()
+        interaction.message.edit = AsyncMock()
+        interaction.guild.voice_client = None
+
+        channel = MagicMock()
+        channel.id = 9923
+        channel.name = "General"
+        channel.user_limit = 0
+        channel.connect = AsyncMock()
+        perms = MagicMock()
+        perms.connect = True
+        perms.speak = True
+        channel.permissions_for.return_value = perms
+        interaction.user.voice = MagicMock()
+        interaction.user.voice.channel = channel
+
+        view = bot.ControlPanelView(interaction.guild)
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+            and child.custom_id == "panel:connect"
+        )
+
+        try:
+            with patch("bot.synthesize", new=AsyncMock(return_value=b"hi")):
+                await button.callback(interaction)
+
+            interaction.response.defer.assert_awaited_once_with()
+            interaction.followup.send.assert_not_awaited()
+            interaction.message.edit.assert_awaited_once()
+            kwargs = interaction.message.edit.await_args.kwargs
+            assert kwargs["embed"].title == "読み上げBot 操作パネル"
+            assert kwargs["view"] is not None
+        finally:
+            bot.queues.pop(9921, None)
+            bot.read_channels.pop(9921, None)
+
+    async def test_panel_disconnect_updates_existing_panel_without_public_message(
+        self, mock_db_pool
+    ):
+        import bot
+
+        interaction = _make_interaction(guild_id=9931)
+        interaction.message = MagicMock()
+        interaction.message.edit = AsyncMock()
+        interaction.guild.voice_client = MagicMock()
+        interaction.guild.voice_client.is_connected.return_value = True
+        interaction.guild.voice_client.disconnect = AsyncMock()
+
+        view = bot.ControlPanelView(interaction.guild)
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+            and child.custom_id == "panel:disconnect"
+        )
+
+        await button.callback(interaction)
+
+        interaction.response.defer.assert_awaited_once_with()
+        interaction.response.send_message.assert_not_awaited()
+        interaction.message.edit.assert_awaited_once()
+
+    async def test_panel_disconnect_reports_when_panel_update_fails(self, mock_db_pool):
+        import bot
+
+        interaction = _make_interaction(guild_id=9932)
+        interaction.message = MagicMock()
+        interaction.message.edit = AsyncMock(side_effect=RuntimeError("gone"))
+        interaction.guild.voice_client = MagicMock()
+        interaction.guild.voice_client.is_connected.return_value = True
+        interaction.guild.voice_client.disconnect = AsyncMock()
+
+        view = bot.ControlPanelView(interaction.guild)
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+            and child.custom_id == "panel:disconnect"
+        )
+
+        await button.callback(interaction)
+
+        interaction.response.defer.assert_awaited_once_with()
+        interaction.response.send_message.assert_not_awaited()
+        interaction.followup.send.assert_awaited_once()
+        args, kwargs = interaction.followup.send.await_args
+        assert "切断しました" in args[0]
+        assert "`/panel`" in args[0]
+        assert kwargs["ephemeral"] is True
+
+    async def test_panel_skip_updates_existing_panel_without_public_message(self):
+        import bot
+
+        interaction = _make_interaction(guild_id=9941)
+        interaction.message = MagicMock()
+        interaction.message.edit = AsyncMock()
+        interaction.guild.voice_client = MagicMock()
+        interaction.guild.voice_client.is_connected.return_value = True
+        interaction.guild.voice_client.is_playing.return_value = True
+
+        view = bot.ControlPanelView(interaction.guild)
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button) and child.custom_id == "panel:skip"
+        )
+
+        await button.callback(interaction)
+
+        interaction.response.defer.assert_awaited_once_with()
+        interaction.response.send_message.assert_not_awaited()
+        interaction.guild.voice_client.stop.assert_called_once()
+        interaction.message.edit.assert_awaited_once()
+
+    async def test_vc_toggle_connects_with_panel_response(self):
+        import bot
+        from bot import vc_toggle
+
+        interaction = _make_interaction(guild_id=9951, user_id=9952)
+        interaction.guild.voice_client = None
+
+        channel = MagicMock()
+        channel.id = 9953
+        channel.name = "General"
+        channel.user_limit = 0
+        channel.connect = AsyncMock()
+        perms = MagicMock()
+        perms.connect = True
+        perms.speak = True
+        channel.permissions_for.return_value = perms
+        interaction.user.voice = MagicMock()
+        interaction.user.voice.channel = channel
+
+        try:
+            with patch("bot.synthesize", new=AsyncMock(return_value=b"hi")):
+                await vc_toggle.callback(interaction)
+
+            interaction.response.defer.assert_awaited_once_with(thinking=True)
+            kwargs = interaction.followup.send.await_args.kwargs
+            assert kwargs["embed"].title == "読み上げBot 操作パネル"
+            assert kwargs["view"] is not None
+        finally:
+            bot.queues.pop(9951, None)
+            bot.read_channels.pop(9951, None)
 
     async def test_status_command_is_private_by_default(self):
         from bot import status_cmd
@@ -3170,7 +3350,7 @@ class TestOnVoiceStateUpdate:
     async def test_bot_reconnect_skips_re_record_when_no_read_channel(
         self, monkeypatch
     ):
-        """read_channels が無い (/leave 後等) 場合は再記録しない。"""
+        """read_channels が無い（切断後等）場合は再記録しない。"""
         import asyncio as asyncio_mod
 
         import bot
@@ -5536,7 +5716,7 @@ class TestHelpCommand:
         from bot import _build_help_embed
 
         embed = _build_help_embed()
-        assert embed.title == "読み上げBot — コマンド一覧"
+        assert embed.title == "読み上げBot — パネル案内"
 
     def test_help_embed_contains_voice_license_urls_and_label(self):
         from bot import (
@@ -5554,37 +5734,40 @@ class TestHelpCommand:
         assert "ライセンス" in description
 
     @pytest.mark.parametrize(
+        "command", ["/vc", "/panel", "/mute", "/unmute", "/showmute"]
+    )
+    def test_help_embed_lists_remaining_commands(self, command):
+        from bot import _build_help_embed
+
+        description = _build_help_embed().description or ""
+        assert command in description
+
+    @pytest.mark.parametrize(
         "command",
         [
-            "/vc",
-            "/panel",
             "/join",
             "/leave",
             "/skip",
             "/speaker",
             "/voice",
             "/dict",
-            "/mute",
-            "/unmute",
-            "/showmute",
             "/status",
             "/license",
             "/credit",
             "/help",
         ],
     )
-    def test_help_embed_lists_all_commands(self, command):
+    def test_help_embed_omits_panel_operated_commands(self, command):
         from bot import _build_help_embed
 
         description = _build_help_embed().description or ""
-        assert command in description
+        assert f"`{command}`" not in description
 
-    def test_help_embed_without_prefix_starts_with_command_list(self):
+    def test_help_embed_without_prefix_starts_with_panel_guidance(self):
         from bot import _build_help_embed
 
         description = _build_help_embed().description or ""
-        # prefix 無し時は冒頭が即コマンド一覧。接続メッセージは混入しない
-        assert description.lstrip().startswith("`/vc`")
+        assert description.lstrip().startswith("読み上げBotの操作は `/panel`")
         assert "接続しました" not in description
 
     def test_help_embed_with_prefix_inserts_prefix_at_top(self):
@@ -5593,20 +5776,21 @@ class TestHelpCommand:
         embed = _build_help_embed(prefix="「general」に接続しました")
         description = embed.description or ""
         assert description.startswith("「general」に接続しました")
-        # prefix の後にコマンド一覧が続く
-        assert "`/vc`" in description
+        assert "`/panel`" in description
+        assert "`/join`" not in description
 
     async def test_help_command_rejects_when_no_guild(self):
-        """help は guild 外でも動く想定（コマンド一覧は読み上げ依存ではない）"""
+        """旧 help 互換 handler も panel と同じく guild 内だけで使う。"""
         from bot import help_cmd
 
         interaction = _make_interaction()
         interaction.guild = None
-        # _require_guild_interaction を使っていないので例外なく完走する
         await help_cmd.callback(interaction)
-        interaction.response.send_message.assert_awaited_once()
+        interaction.response.send_message.assert_awaited_once_with(
+            "このコマンドはサーバー内でのみ利用できます"
+        )
 
-    async def test_help_command_sends_embed_with_urls(self):
+    async def test_help_command_sends_compact_panel_with_license_entrypoint(self):
         from bot import (
             _COEIROINK_OFFICIAL_URL,
             _SHAREVOX_OFFICIAL_URL,
@@ -5622,12 +5806,17 @@ class TestHelpCommand:
         embed = kwargs.get("embed")
         assert embed is not None
         assert isinstance(embed, discord.Embed)
-        assert _VOICEVOX_OFFICIAL_URL in (embed.description or "")
-        assert _COEIROINK_OFFICIAL_URL in (embed.description or "")
-        assert _SHAREVOX_OFFICIAL_URL in (embed.description or "")
+        assert embed.title == "読み上げBot 操作パネル"
+        assert kwargs["view"] is not None
+        values = "\n".join(field.value for field in embed.fields)
+        assert "ライセンス" in values
+        assert "VOICEVOX" in values
+        assert _VOICEVOX_OFFICIAL_URL not in values
+        assert _COEIROINK_OFFICIAL_URL not in values
+        assert _SHAREVOX_OFFICIAL_URL not in values
 
     async def test_help_command_uses_no_prefix(self):
-        """/help は接続メッセージを含まない（純粋なコマンド一覧）"""
+        """旧 help 互換 handler は接続完了文を含まない panel を返す。"""
         from bot import help_cmd
 
         interaction = _make_interaction()
@@ -5637,9 +5826,20 @@ class TestHelpCommand:
         description = embed.description or ""
         assert "接続しました" not in description
 
-    def test_help_command_metadata(self):
-        """slash コマンドとして name/description が正しく設定されている"""
-        from bot import help_cmd
+    def test_panel_operated_commands_are_not_registered(self):
+        import bot
 
-        assert help_cmd.name == "help"
-        assert help_cmd.description == "コマンド一覧を表示"
+        registered = {command.name for command in bot.tree.get_commands()}
+        assert {"vc", "panel", "mute", "unmute", "showmute"} <= registered
+        assert {
+            "join",
+            "leave",
+            "skip",
+            "speaker",
+            "voice",
+            "dict",
+            "status",
+            "license",
+            "credit",
+            "help",
+        }.isdisjoint(registered)

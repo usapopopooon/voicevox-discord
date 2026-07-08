@@ -213,7 +213,7 @@ Python 実装であっても、将来 TypeScript へ置き換える可能性を�
 |---|---|
 | 言語 | Python 3.12 |
 | Discord ライブラリ | discord.py 2.7+ (voice extras) |
-| コマンド体系 | スラッシュコマンド (`app_commands`) |
+| コマンド体系 | 少数のスラッシュコマンド (`app_commands`) + 操作パネル UI |
 | 音声合成 | VOICEVOX Engine (CPU版, Docker) |
 | HTTP クライアント | aiohttp |
 | DB | PostgreSQL + asyncpg |
@@ -225,25 +225,24 @@ Python 実装であっても、将来 TypeScript へ置き換える可能性を�
 
 | コマンド | 説明 |
 |---|---|
-| `/panel` | 操作パネルを表示 |
-| `/join` | ユーザーがいるボイスチャンネルに接続 |
-| `/leave` | ボイスチャンネルから切断 |
-| `/vc` | VCに接続/切断をトグル |
-| `/speaker <character> [style]` | 読み上げキャラクターを変更（characterは `[VOICEVOX] ずんだもん` のようにエンジン名付きで選択） |
-| `/voice` | 音声パラメータを変更（話速・音高・抑揚・音量） |
-| `/skip` | 現在読み上げ中の音声をスキップ |
+| `/vc` | VC接続/切断をトグル |
+| `/panel` | 操作パネルを再投稿 |
 | `/mute <user>` | 指定ユーザーの読み上げをミュート |
 | `/unmute <user>` | 指定ユーザーのミュートを解除 |
 | `/showmute` | ミュート中のユーザー一覧 |
-| `/dict` | ギルド辞書の設定（ボタン UI で追加・削除） |
-| `/status` | 接続状態・キュー・TTSエンジン状態を表示 |
-| `/license` | 音声ライセンスと規約リンクを表示 |
-| `/credit` | 現在の話者のクレジット候補を表示 |
+
+接続/切断は `/vc` でも操作できる。スキップ、話者変更、音声設定、辞書、
+状態確認、ライセンス確認は操作パネルのボタンに集約する。`/join` `/leave` は
+登録せず、コマンドの入口を増やしすぎない。
 
 ## UI / UX 方針
 
 - `/panel` を利用者の入口にし、接続、切断、スキップ、音声設定、話者変更、
   辞書、状態確認、ライセンス確認へボタンで移動できるようにする。
+- command で VC を操作したい利用者向けには `/vc` トグルだけを残し、
+  `/join` `/leave` は登録しない。
+- 接続成功時はコマンド一覧ヘルプではなく、現在状態と操作案内を含む統合パネルを投稿する。
+  `/panel` はその統合パネルの再投稿として扱う。
 - 公開パネルやスラッシュコマンドには管理者向けデバッグ導線を置かない。
   直近エラーや trace ID などの詳細調査情報は Bot 運営側ログでのみ扱う。
 - 接続、切断、スキップはそれぞれ独立したボタンにし、現在の接続・再生状態に応じて
@@ -260,14 +259,14 @@ Python 実装であっても、将来 TypeScript へ置き換える可能性を�
 - ログは `event=... fields={...}` の形式でイベント名を固定し、検索しやすくする。
 - 主なログフィールドは `trace_id`, `guild_id`, `channel_id`, `user_id`,
   `speaker_id`, `queue_length`, `latency_ms`, `error`。
-- `/status` は接続状態、読み上げ対象チャンネル、キュー長、話者数、
+- 操作パネルの状態表示は、接続状態、読み上げ対象チャンネル、キュー長、話者数、
   エンジン取得状態のみを表示する。
 - 直近エラー、trace ID、DB状態、Botインスタンスなどの内部情報は利用者向けUIに表示しない。
 
 ## ライセンス・権利対応
 
-- `/license` で VOICEVOX / COEIROINK / SHAREVOX の公式URL・規約URL・表記例を表示する。
-- `/credit` で現在のユーザー設定に基づくクレジット候補を表示する。候補はエンジン名の
+- 操作パネルのライセンス導線で VOICEVOX / COEIROINK / SHAREVOX の公式URL・規約URL・表記例を表示する。
+- 現在のユーザー設定に基づくクレジット候補も同じ導線で表示する。候補はエンジン名の
   重複を避けるため、内部表示名の `[ENGINE]` 接頭辞を外して生成する。
 - Bot側の表示は案内であり、実際の利用可否・クレジット条件・禁止用途は
   各公式サイトおよび各話者の規約を確認する。
@@ -365,12 +364,12 @@ CREATE TABLE schema_migrations (
 
 ### VC セッション復旧
 
-デプロイ・プロセス再起動後に元の VC へ自動復帰する。**ランタイム切断（モデレータ手動切断・ネットワーク断・権限剥奪等）は復旧対象外** とし、ユーザーが必要なら `/join` で再接続する設計。これにより audit log 権限要件や false-positive 復帰を回避する。
+デプロイ・プロセス再起動後に元の VC へ自動復帰する。**ランタイム切断（モデレータ手動切断・ネットワーク断・権限剥奪等）は復旧対象外** とし、ユーザーが必要なら `/panel` から再接続する設計。これにより audit log 権限要件や false-positive 復帰を回避する。
 
-- `/join` 成功時に `active_voice_sessions` へ UPSERT、`/leave` `/vc(off)` `全員退出` `Bot がギルドから外れる` 時は DELETE
+- パネルの接続成功時に `active_voice_sessions` へ UPSERT、パネルの切断、全員退出、Bot がギルドから外れる時は DELETE
 - 起動時: `on_ready` 末尾で `_spawn_background(_restore_voice_sessions_on_startup())` を発火し、全 session を順次（並列度1で rate limit 安全側）に再接続
 - ランタイム切断（`on_voice_state_update` で Bot 自身が VC から外れた）: `_cleanup_guild_playback_state` で queue/locks のみクリアし `read_channels` は保持（discord.py auto-reconnect 後の TTS 継続用）。**DB session は即座に `_safe_forget_voice_session` で削除**（手動切断/kick の場合は次起動時の意図しない rejoin を防ぐ）
-- ランタイム再接続（`on_voice_state_update` で Bot が VC へ復帰）: `_safe_record_voice_session` で DB session を**再記録**する。これにより一時的ネットワーク断（WS 4006 等）で discord.py が auto-reconnect した場合、削除した DB session を再び記録し、後続のプロセス再起動時にも `_restore_voice_sessions_on_startup` で復帰できる。`read_channels` が無い場合（/leave 後等）は再記録しない
+- ランタイム再接続（`on_voice_state_update` で Bot が VC へ復帰）: `_safe_record_voice_session` で DB session を**再記録**する。これにより一時的ネットワーク断（WS 4006 等）で discord.py が auto-reconnect した場合、削除した DB session を再び記録し、後続のプロセス再起動時にも `_restore_voice_sessions_on_startup` で復帰できる。`read_channels` が無い場合（切断後等）は再記録しない
 - **手動切断/kick の動作**: discord.py は auto-reconnect しないため再接続イベント発火なし → 切断時に削除された DB session が空のまま → 次起動時 restore 対象外 → bot は VC に戻らない
 - **プロセス即死（deploy/crash）の動作**: `on_voice_state_update` が発火する前に process が消えるため DB session 削除は走らない → DB に session 残存 → 次起動時 `_restore_voice_sessions_on_startup` で復帰
 - 起動時 restore は接続前に以下をチェックし、満たさなければ復旧せず DB から session 削除:
@@ -420,7 +419,7 @@ Discord互換WAVなら PCMAudio で直接再生
 - Discord API 503 などログイン失敗時は指数バックオフで再試行
 - トークン無効化（`LoginFailure` / WebSocket close 4004）検知時は永続的失敗として扱い、`TOKEN_INVALID_BACKOFF_SECONDS`（既定300秒）待機してから exit する。コンテナ即再起動による fast restart loop を緩和し、ログ汚染とクォータ消費を抑える。Discord Developer Portal でトークン再生成 → 環境変数更新 → redeploy が必要
 - 複数Botモードで `DISCORD_TOKENS` 内の1トークンのみ無効化された場合、その子プロセスは300秒間隔でクラッシュ→再起動を繰り返すが、親のクラッシュループ検出（300秒に5回）には到達しないため他の正常な子プロセスは影響を受けず動作継続する
-- VC 状態判定は `_has_active_voice_connection`（`guild.voice_client` 存在 + `is_connected()` 真）で統一し、stale な voice_client 残骸があっても `/vc` `/leave` `/join` の挙動が破綻しないようにしている。inactive 分岐では `_reset_voice_state` で残骸の disconnect とメモリ状態の完全クリアを行ってから次の処理へ移る
+- VC 状態判定は `_has_active_voice_connection`（`guild.voice_client` 存在 + `is_connected()` 真）で統一し、stale な voice_client 残骸があってもパネルの接続/切断操作が破綻しないようにしている。inactive 分岐では `_reset_voice_state` で残骸の disconnect とメモリ状態の完全クリアを行ってから次の処理へ移る
 
 ## 環境変数
 

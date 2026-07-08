@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 from collections import OrderedDict, deque
-from collections.abc import Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -304,6 +304,10 @@ async def close_http_session():
 class TtsClient(discord.Client):
     """discord.Client のサブクラス。終了時に共有 HTTP セッションも閉じる。"""
 
+    async def setup_hook(self) -> None:
+        """gateway 接続前に、再起動後も受けたい persistent view を登録する。"""
+        register_persistent_views()
+
     async def close(self) -> None:
         # discord.py の close は gateway だけを見るため、Bot が別途持つ
         # aiohttp server/client をここで一緒に閉じる。終了順序を逆にすると、
@@ -327,6 +331,7 @@ client = TtsClient(
 )
 tree = app_commands.CommandTree(client)
 _internal_tts_api_runner: web.AppRunner | None = None
+_persistent_views_registered = False
 
 # ギルドあたりの再生キュー最大長。スパム時は新規メッセージ側を drop して、
 # 「読み上げが何分も遅れて続く」体感遅延を抑える（小さい値ほど追従性が良い）。
@@ -605,6 +610,15 @@ def _build_license_embed(
         settings = get_user_settings(guild_id, user_id)
         current = _credit_for_speaker_id(settings.speaker_id)
     return license_feature.build_license_embed(current)
+
+
+def _panel_license_lines() -> tuple[str, ...]:
+    """control panel snapshot に載せる短いライセンス案内を返す。"""
+    engine_names = " / ".join(info.engine for info in license_feature.LICENSE_INFOS)
+    return (
+        f"対応エンジン: {engine_names}",
+        "詳細とクレジット表記は「ライセンス」で確認できます",
+    )
 
 
 def _build_status_embed(guild: discord.Guild) -> discord.Embed:
@@ -1227,6 +1241,15 @@ ControlPanelView = discord_bot_ui.ControlPanelView
 _play_voice_sample = discord_bot_ui.play_voice_sample
 
 
+def register_persistent_views() -> None:
+    """再起動後の公開パネル操作を受ける persistent view を一度だけ登録する。"""
+    global _persistent_views_registered
+    if _persistent_views_registered:
+        return
+    client.add_view(ControlPanelView())
+    _persistent_views_registered = True
+
+
 # --- イベント・コマンド ---
 
 
@@ -1262,10 +1285,19 @@ def _build_help_embed(prefix: str | None = None) -> discord.Embed:
     return discord_bot_help.build_help_embed(prefix)
 
 
-@tree.command(name="join", description="ボイスチャンネルに接続")
-async def join(interaction: discord.Interaction):
-    """discord_bot feature 経由で VC に接続する。"""
+@dataclass(frozen=True)
+class _InternalInteractionHandler:
+    """slash command から外した handler をテストしやすい形で保持する。"""
+
+    callback: Callable[..., Coroutine[Any, Any, None]]
+
+
+async def _join_callback(interaction: discord.Interaction) -> None:
+    """パネルの接続ボタンから使う VC 接続 handler。"""
     await discord_bot_commands.join(_runtime_context(), interaction)
+
+
+join = _InternalInteractionHandler(_join_callback)
 
 
 @client.event
@@ -1280,22 +1312,31 @@ async def on_voice_state_update(
     )
 
 
-@tree.command(name="leave", description="ボイスチャンネルから切断")
-async def leave(interaction: discord.Interaction):
-    """discord_bot feature 経由で VC から切断する。"""
+async def _leave_callback(interaction: discord.Interaction) -> None:
+    """パネルの切断ボタンから使う VC 切断 handler。"""
     await discord_bot_commands.leave(_runtime_context(), interaction)
+
+
+leave = _InternalInteractionHandler(_leave_callback)
+
+
+async def _vc_toggle_callback(interaction: discord.Interaction) -> None:
+    """互換テスト用に残す VC 接続切り替え handler。"""
+    await discord_bot_commands.vc_toggle(_runtime_context(), interaction)
 
 
 @tree.command(name="vc", description="VCに接続/切断をトグル")
 async def vc_toggle(interaction: discord.Interaction):
     """discord_bot feature 経由で VC 接続を切り替える。"""
-    await discord_bot_commands.vc_toggle(_runtime_context(), interaction)
+    await _vc_toggle_callback(interaction)
 
 
-@tree.command(name="skip", description="現在読み上げ中の音声をスキップ")
-async def skip(interaction: discord.Interaction):
-    """discord_bot feature 経由で再生をスキップする。"""
+async def _skip_callback(interaction: discord.Interaction) -> None:
+    """パネルのスキップボタンから使う再生停止 handler。"""
     await discord_bot_commands.skip(_runtime_context(), interaction)
+
+
+skip = _InternalInteractionHandler(_skip_callback)
 
 
 @tree.command(name="mute", description="指定ユーザーの読み上げをミュート")
@@ -1318,100 +1359,101 @@ async def showmute_cmd(interaction: discord.Interaction):
     await discord_bot_commands.showmute(_runtime_context(), interaction)
 
 
-@tree.command(name="speaker", description="自分の読み上げキャラクターを変更")
-@app_commands.describe(
-    character="キャラクター名（例: [VOICEVOX] ずんだもん）",
-    style="スタイル名（省略時: 先頭のスタイル）",
-)
-async def speaker(
+async def _speaker_callback(
     interaction: discord.Interaction,
     character: str,
     style: str | None = None,
-):
-    """discord_bot feature 経由で話者を設定する。"""
+) -> None:
+    """パネル UI の話者選択と同じ設定処理を呼び出す互換 handler。"""
     await discord_bot_commands.speaker(
         _runtime_context(), interaction, character, style
     )
 
 
-@speaker.autocomplete("character")
+speaker = _InternalInteractionHandler(_speaker_callback)
+
+
 async def speaker_char_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
-    """話者キャラクターの autocomplete 候補を返す。"""
+    """話者キャラクターの autocomplete 候補を返す互換 helper。"""
     return await discord_bot_commands.speaker_char_autocomplete(
         _runtime_context(), interaction, current
     )
 
 
-@speaker.autocomplete("style")
 async def speaker_style_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
-    """話者スタイルの autocomplete 候補を返す。"""
+    """話者スタイルの autocomplete 候補を返す互換 helper。"""
     return await discord_bot_commands.speaker_style_autocomplete(
         _runtime_context(), interaction, current
     )
 
 
-@tree.command(name="voice", description="自分の読み上げ音声パラメータを変更")
-@app_commands.describe(
-    speed="話速（0.5〜2.0、デフォルト: 1.0）",
-    pitch="音高（-0.15〜0.15、デフォルト: 0.0）",
-    intonation="抑揚（0.0〜2.0、デフォルト: 1.0）",
-    volume="音量（0.0〜2.0、デフォルト: 1.0）",
-)
-async def voice(
+async def _voice_callback(
     interaction: discord.Interaction,
     speed: float | None = None,
     pitch: float | None = None,
     intonation: float | None = None,
     volume: float | None = None,
-):
-    """discord_bot feature 経由で音声設定を表示または更新する。"""
+) -> None:
+    """パネル UI の音声設定と同じ保存処理を呼び出す互換 handler。"""
     await discord_bot_commands.voice(
         _runtime_context(), interaction, speed, pitch, intonation, volume
     )
 
 
-@tree.command(name="dict", description="読み上げ辞書の設定")
-async def dict_cmd(interaction: discord.Interaction):
-    """discord_bot feature 経由で辞書 UI を開く。"""
+voice = _InternalInteractionHandler(_voice_callback)
+
+
+async def _dict_callback(interaction: discord.Interaction) -> None:
+    """パネルの辞書ボタンから使う辞書 UI handler。"""
     await discord_bot_commands.dictionary(_runtime_context(), interaction)
 
 
-@tree.command(name="panel", description="読み上げBotの操作パネルを表示")
+dict_cmd = _InternalInteractionHandler(_dict_callback)
+
+
+@tree.command(name="panel", description="読み上げBotの操作パネルを再投稿")
 async def panel_cmd(interaction: discord.Interaction):
-    """discord_bot feature 経由で操作パネルを投稿する。"""
+    """discord_bot feature 経由で統合操作パネルを再投稿する。"""
     await discord_bot_commands.panel(_runtime_context(), interaction)
 
 
-@tree.command(name="status", description="読み上げBotの状態を表示")
-@app_commands.describe(private="自分だけに表示するか（既定: true）")
-async def status_cmd(
+async def _status_callback(
     interaction: discord.Interaction,
     private: bool = True,
-):
-    """discord_bot feature 経由で公開可能な状態を表示する。"""
+) -> None:
+    """パネルの状態ボタンから使う status handler。"""
     await discord_bot_commands.status(_runtime_context(), interaction, private)
 
 
-@tree.command(name="license", description="音声ライセンスと規約リンクを表示")
-async def license_cmd(interaction: discord.Interaction):
-    """discord_bot feature 経由でライセンス案内を表示する。"""
+status_cmd = _InternalInteractionHandler(_status_callback)
+
+
+async def _license_callback(interaction: discord.Interaction) -> None:
+    """パネルのライセンスボタンから使う license handler。"""
     await discord_bot_commands.license(_runtime_context(), interaction)
 
 
-@tree.command(name="credit", description="現在の話者のクレジット候補を表示")
-async def credit_cmd(interaction: discord.Interaction):
-    """discord_bot feature 経由で現在のクレジット案内を表示する。"""
+license_cmd = _InternalInteractionHandler(_license_callback)
+
+
+async def _credit_callback(interaction: discord.Interaction) -> None:
+    """ライセンス表示へ統合した credit handler の互換入口。"""
     await discord_bot_commands.credit(_runtime_context(), interaction)
 
 
-@tree.command(name="help", description="コマンド一覧を表示")
-async def help_cmd(interaction: discord.Interaction):
-    """discord_bot feature 経由でコマンド help を表示する。"""
+credit_cmd = _InternalInteractionHandler(_credit_callback)
+
+
+async def _help_callback(interaction: discord.Interaction) -> None:
+    """旧 help 導線から統合パネルを表示する互換入口。"""
     await discord_bot_commands.help_command(_runtime_context(), interaction)
+
+
+help_cmd = _InternalInteractionHandler(_help_callback)
 
 
 @client.event
@@ -1476,6 +1518,7 @@ def _mark_dynamic_runtime_exports() -> None:
         _respond,
         _voice_settings_lines,
         _build_license_embed,
+        _panel_license_lines,
         _build_status_embed,
         _sync_text_processing_state_to_module,
         _sync_text_processing_state_from_module,
@@ -1526,6 +1569,7 @@ def _mark_dynamic_runtime_exports() -> None:
         _page_items,
         _build_speaker_picker_embed,
         _refresh_panel_message,
+        register_persistent_views,
         _play_voice_sample,
         _attachment_category,
         _build_attachment_notice,

@@ -9,13 +9,66 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import discord
 from discord import app_commands
 
+PanelResponseMode = Literal["post", "update"]
 
-async def join(ctx: Any, interaction: discord.Interaction) -> None:
+
+async def _send_message(
+    interaction: discord.Interaction,
+    content: str,
+    *,
+    ephemeral: bool,
+) -> None:
+    """必要な場合だけ ephemeral を付けて interaction response を返す。"""
+    if ephemeral:
+        await interaction.response.send_message(content, ephemeral=True)
+        return
+    await interaction.response.send_message(content)
+
+
+async def _followup_message(
+    interaction: discord.Interaction,
+    content: str,
+    *,
+    ephemeral: bool,
+) -> None:
+    """defer 後の追加応答を公開/非公開で出し分ける。"""
+    if ephemeral:
+        await interaction.followup.send(content, ephemeral=True)
+        return
+    await interaction.followup.send(content)
+
+
+async def _refresh_panel_or_report(
+    ctx: Any,
+    interaction: discord.Interaction,
+    guild: discord.Guild,
+    completed_message: str,
+) -> None:
+    """panel 更新に失敗した場合だけ、完了と再投稿手段を private に伝える。"""
+    refreshed = await ctx._refresh_panel_message(interaction, guild)
+    if refreshed:
+        return
+    await _followup_message(
+        interaction,
+        (
+            f"{completed_message}\n"
+            "パネルを更新できなかったため、`/panel` で再投稿してください。"
+        ),
+        ephemeral=True,
+    )
+
+
+async def join(
+    ctx: Any,
+    interaction: discord.Interaction,
+    *,
+    panel_response: PanelResponseMode = "post",
+) -> None:
     """実行者の VC に接続し、現在の text channel の読み上げを開始する。"""
     guild = await ctx._require_guild_interaction(interaction)
     if guild is None:
@@ -23,24 +76,31 @@ async def join(ctx: Any, interaction: discord.Interaction) -> None:
     trace_id = ctx._new_trace_id()
     ctx._log_event(
         logging.INFO,
-        "command.join.start",
+        "voice.connect.start",
         trace_id=trace_id,
         guild_id=guild.id,
         user_id=interaction.user.id,
         channel_id=interaction.channel_id,
     )
+    private_errors = panel_response == "update"
 
     invoker = cast(discord.Member, interaction.user)
     if invoker.voice is None or invoker.voice.channel is None:
-        await interaction.response.send_message("先にボイスチャンネルに入ってください")
+        await _send_message(
+            interaction,
+            "先にボイスチャンネルに入ってください",
+            ephemeral=private_errors,
+        )
         return
 
     channel = invoker.voice.channel
 
     text_channel_id = interaction.channel_id
     if text_channel_id is None:
-        await interaction.response.send_message(
-            "テキストチャンネル情報を取得できませんでした"
+        await _send_message(
+            interaction,
+            "テキストチャンネル情報を取得できませんでした",
+            ephemeral=private_errors,
         )
         return
 
@@ -48,24 +108,41 @@ async def join(ctx: Any, interaction: discord.Interaction) -> None:
     if me is None and ctx.client.user is not None:
         me = guild.get_member(ctx.client.user.id)
     if me is None:
-        await interaction.response.send_message(
-            "Botの権限情報を取得できませんでした。しばらく待ってから再試行してください"
+        await _send_message(
+            interaction,
+            "Botの権限情報を取得できませんでした。しばらく待ってから再試行してください",
+            ephemeral=private_errors,
         )
         return
 
     perms = channel.permissions_for(me)
     if not perms.connect:
-        await interaction.response.send_message("そのVCに接続する権限がありません")
+        await _send_message(
+            interaction,
+            "そのVCに接続する権限がありません",
+            ephemeral=private_errors,
+        )
         return
     if not perms.speak:
-        await interaction.response.send_message("そのVCで発言する権限がありません")
+        await _send_message(
+            interaction,
+            "そのVCで発言する権限がありません",
+            ephemeral=private_errors,
+        )
         return
     if channel.user_limit and len(channel.members) >= channel.user_limit:
         if not perms.manage_channels:
-            await interaction.response.send_message("VCの人数制限に達しています")
+            await _send_message(
+                interaction,
+                "VCの人数制限に達しています",
+                ephemeral=private_errors,
+            )
             return
 
-    await interaction.response.defer(thinking=True)
+    if panel_response == "update":
+        await interaction.response.defer()
+    else:
+        await interaction.response.defer(thinking=True)
 
     existing_active = ctx._has_active_voice_connection(guild)
     try:
@@ -89,8 +166,10 @@ async def join(ctx: Any, interaction: discord.Interaction) -> None:
             voice_channel_id=getattr(channel, "id", None),
             error=str(e),
         )
-        await interaction.followup.send(
-            "VCへの接続に失敗しました。権限やVCの状態を確認してから再試行してください。"
+        await _followup_message(
+            interaction,
+            "VCへの接続に失敗しました。権限やVCの状態を確認してから再試行してください。",
+            ephemeral=private_errors,
         )
         return
 
@@ -105,13 +184,21 @@ async def join(ctx: Any, interaction: discord.Interaction) -> None:
     except Exception as e:
         ctx.logger.warning(f"VCセッション保存に失敗: {e}")
 
-    embed = ctx._build_help_embed(
-        prefix=(
-            f"「{channel.name}」に接続しました\n"
-            "このチャンネルのメッセージを読み上げます"
-        ),
+    notice = (
+        f"「{channel.name}」に接続しました\nこのチャンネルのメッセージを読み上げます"
     )
-    await interaction.followup.send(embed=embed)
+    if panel_response == "update":
+        await _refresh_panel_or_report(
+            ctx,
+            interaction,
+            guild,
+            f"「{channel.name}」に接続しました。",
+        )
+    else:
+        await interaction.followup.send(
+            embed=ctx._build_panel_embed(guild, notice=notice),
+            view=ctx.ControlPanelView(guild),
+        )
     ctx._log_event(
         logging.INFO,
         "voice.connect.succeeded",
@@ -139,7 +226,12 @@ async def join(ctx: Any, interaction: discord.Interaction) -> None:
         ctx.logger.error(f"接続挨拶の音声合成エラー: {e}")
 
 
-async def leave(ctx: Any, interaction: discord.Interaction) -> None:
+async def leave(
+    ctx: Any,
+    interaction: discord.Interaction,
+    *,
+    panel_response: PanelResponseMode = "post",
+) -> None:
     """VC から切断し、guild の再生/session 状態を消す。"""
     guild = await ctx._require_guild_interaction(interaction)
     if guild is None:
@@ -147,6 +239,8 @@ async def leave(ctx: Any, interaction: discord.Interaction) -> None:
     trace_id = ctx._new_trace_id()
 
     if ctx._has_active_voice_connection(guild):
+        if panel_response == "update":
+            await interaction.response.defer()
         try:
             await ctx.forget_voice_session(guild.id)
         except Exception as e:
@@ -160,7 +254,10 @@ async def leave(ctx: Any, interaction: discord.Interaction) -> None:
             guild_id=guild.id,
             user_id=interaction.user.id,
         )
-        await interaction.response.send_message("切断しました")
+        if panel_response == "update":
+            await _refresh_panel_or_report(ctx, interaction, guild, "切断しました。")
+        else:
+            await interaction.response.send_message("切断しました")
         return
 
     await ctx._reset_voice_state(guild)
@@ -171,7 +268,11 @@ async def leave(ctx: Any, interaction: discord.Interaction) -> None:
         guild_id=guild.id,
         user_id=interaction.user.id,
     )
-    await interaction.response.send_message("ボイスチャンネルに接続していません")
+    await _send_message(
+        interaction,
+        "ボイスチャンネルに接続していません",
+        ephemeral=panel_response == "update",
+    )
 
 
 async def vc_toggle(ctx: Any, interaction: discord.Interaction) -> None:
@@ -194,7 +295,12 @@ async def vc_toggle(ctx: Any, interaction: discord.Interaction) -> None:
     await join(ctx, interaction)
 
 
-async def skip(ctx: Any, interaction: discord.Interaction) -> None:
+async def skip(
+    ctx: Any,
+    interaction: discord.Interaction,
+    *,
+    panel_response: PanelResponseMode = "post",
+) -> None:
     """再生中の audio item があれば停止する。"""
     guild = await ctx._require_guild_interaction(interaction)
     if guild is None:
@@ -203,12 +309,25 @@ async def skip(ctx: Any, interaction: discord.Interaction) -> None:
 
     vc = ctx._as_voice_client(guild.voice_client)
     if vc is None or not ctx._is_vc_playing(vc):
-        await interaction.response.send_message("再生中の音声はありません")
+        await _send_message(
+            interaction,
+            "再生中の音声はありません",
+            ephemeral=panel_response == "update",
+        )
         return
+    if panel_response == "update":
+        await interaction.response.defer()
     try:
         vc.stop()
     except discord.ClientException:
-        await interaction.response.send_message("再生中の音声はありません")
+        if panel_response == "update":
+            await _followup_message(
+                interaction,
+                "再生中の音声はありません",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message("再生中の音声はありません")
         return
     ctx._log_event(
         logging.INFO,
@@ -218,7 +337,10 @@ async def skip(ctx: Any, interaction: discord.Interaction) -> None:
         user_id=interaction.user.id,
         queue_length=len(ctx.queues.get(guild.id, [])),
     )
-    await interaction.response.send_message("スキップしました")
+    if panel_response == "update":
+        await _refresh_panel_or_report(ctx, interaction, guild, "スキップしました。")
+    else:
+        await interaction.response.send_message("スキップしました")
 
 
 async def mute(
@@ -509,7 +631,7 @@ async def dictionary(ctx: Any, interaction: discord.Interaction) -> None:
 
 
 async def panel(ctx: Any, interaction: discord.Interaction) -> None:
-    """一般的な Bot 操作用の公開 control panel を投稿する。"""
+    """一般的な Bot 操作用の公開 control panel を再投稿する。"""
     guild = await ctx._require_guild_interaction(interaction)
     if guild is None:
         return
@@ -574,5 +696,11 @@ async def credit(ctx: Any, interaction: discord.Interaction) -> None:
 
 
 async def help_command(ctx: Any, interaction: discord.Interaction) -> None:
-    """command help embed を表示する。"""
-    await interaction.response.send_message(embed=ctx._build_help_embed())
+    """旧 help 導線からも統合 panel を表示するための互換 handler。"""
+    guild = await ctx._require_guild_interaction(interaction)
+    if guild is None:
+        return
+    await interaction.response.send_message(
+        embed=ctx._build_panel_embed(guild),
+        view=ctx.ControlPanelView(guild),
+    )

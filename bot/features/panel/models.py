@@ -14,6 +14,7 @@ class PanelSnapshot:
         read_channel_id: Bot が読む text channel。未設定なら ``None``。
         queue_length: 現在 queue に入っている音声 item 数。
         queue_maxlen: 設定済み queue 容量。
+        license_lines: パネルに表示する音声/ライセンス案内。空なら省略表示にする。
     """
 
     connected: bool
@@ -22,3 +23,4 @@ class PanelSnapshot:
     read_channel_id: int | None
     queue_length: int
     queue_maxlen: int
+    license_lines: tuple[str, ...] = ()

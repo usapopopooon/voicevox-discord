@@ -9,6 +9,7 @@ import discord
 
 async def on_ready(ctx: Any) -> None:
     """Discord gateway login 後に runtime state を初期化する。"""
+    ctx.register_persistent_views()
     if ctx.RUN_DB_MIGRATIONS and not ctx._migrations_ran:
         await ctx.migration_runner.run_pending_migrations(
             ctx.DATABASE_URL, logger=ctx.logger

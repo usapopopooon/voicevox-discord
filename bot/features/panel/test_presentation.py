@@ -42,3 +42,28 @@ def test_panel_embed_formats_playing_state():
     assert "<#123>" in values
     assert "接続: 接続中" in values
     assert "再生: 再生中" in values
+
+
+def test_panel_embed_combines_help_and_remaining_commands():
+    """panel 本体に操作案内と残す command だけがまとまっていること。"""
+    embed = build_panel_embed(
+        PanelSnapshot(
+            connected=False,
+            playing=False,
+            voice_channel_name="未接続",
+            read_channel_id=None,
+            queue_length=0,
+            queue_maxlen=100,
+        ),
+        notice="「General」に接続しました",
+    )
+
+    values = "\n".join(field.value for field in embed.fields)
+
+    assert "「General」に接続しました" in (embed.description or "")
+    assert "接続 / 切断 / スキップ" in values
+    assert "新しいパネル投稿" in values
+    assert "`/vc`" in values
+    assert "`/panel`" in values
+    assert "`/mute`" in values
+    assert "`/join`" not in values
