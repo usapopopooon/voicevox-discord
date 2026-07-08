@@ -351,11 +351,20 @@ async def resolve_self_voice_disconnect(
             )
             return
 
-        restored = await restore_after_voice_disconnect(ctx, guild, previous_channel)
-        if restored:
+        disconnect_meaning = await classify_self_voice_disconnect(ctx, guild)
+        if disconnect_meaning is VoiceDisconnectMeaning.USER_REQUESTED:
+            ctx.logger.info(
+                f"自己 VC 切断をユーザー操作として扱います guild={guild.id}"
+            )
+            await handle_confirmed_self_voice_disconnect(ctx, guild.id)
             return
 
-        await handle_confirmed_self_voice_disconnect(ctx, guild.id)
+        if await restore_after_voice_disconnect(ctx, guild, previous_channel):
+            return
+
+        ctx.logger.info(
+            f"復旧対象の自己 VC 切断として扱い session 削除を保留 guild={guild.id}"
+        )
     except Exception as e:
         ctx.logger.exception(f"自己 VC 切断の解決に失敗 guild={guild.id}: {e}")
     finally:
@@ -427,11 +436,6 @@ async def restore_after_voice_disconnect(
     previous_channel: object,
 ) -> bool:
     """復旧対象の自己切断なら保存済み VC session へ戻す。"""
-    disconnect_meaning = await classify_self_voice_disconnect(ctx, guild)
-    if disconnect_meaning is VoiceDisconnectMeaning.USER_REQUESTED:
-        ctx.logger.info(f"自己 VC 切断をユーザー操作として扱います guild={guild.id}")
-        return False
-
     text_channel_id = await resolve_text_channel_id_for_restore(ctx, guild.id)
     voice_channel_id = getattr(previous_channel, "id", None)
     if text_channel_id is None or not isinstance(voice_channel_id, int):
@@ -525,7 +529,9 @@ async def has_recent_manual_voice_disconnect_audit_entry(
             if age_seconds > MANUAL_VOICE_DISCONNECT_AUDIT_WINDOW_SECONDS:
                 return False
     except discord.Forbidden:
-        ctx.logger.warning(f"audit log を参照できません guild={guild.id}")
+        ctx.logger.info(
+            f"audit log を参照できないため手動切断確認を省略 guild={guild.id}"
+        )
     except discord.HTTPException as e:
         ctx.logger.warning(f"audit log 参照に失敗 guild={guild.id}: {e}")
     except Exception as e:

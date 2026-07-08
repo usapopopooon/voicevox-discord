@@ -3541,6 +3541,76 @@ class TestOnVoiceStateUpdate:
             bot._self_voice_recovery_tasks.clear()
             read_channels.pop(5007, None)
 
+    async def test_recoverable_self_disconnect_without_session_does_not_forget(
+        self, monkeypatch, caplog
+    ):
+        """audit log 不可かつ session 不明でも手動切断扱いで削除しない。"""
+        import logging
+
+        import bot
+        from bot import client, on_voice_state_update, queues, read_channels
+
+        original_user = client._connection.user
+        client._connection.user = MagicMock(id=4242)
+        monkeypatch.setattr(bot, "_self_voice_recovery_tasks", {})
+        monkeypatch.setattr(bot, "_last_user_requested_disconnect_at_by_guild", {})
+        monkeypatch.setattr(bot, "_last_gateway_recoverable_disconnect_at", None)
+        monkeypatch.setattr(
+            bot.voice_sessions_discord_adapter,
+            "SELF_VOICE_RECOVERY_INITIAL_DELAY_SECONDS",
+            0.0,
+        )
+        monkeypatch.setattr(
+            bot.voice_sessions_discord_adapter,
+            "SELF_VOICE_RECOVERY_TIMEOUT_SECONDS",
+            0.0,
+        )
+
+        response = MagicMock(status=403, reason="Forbidden")
+
+        def denied_audit_logs(*_args, **_kwargs):
+            raise discord.Forbidden(response, "missing permissions")
+
+        forget_mock = AsyncMock()
+        reconnect_mock = AsyncMock()
+        monkeypatch.setattr(bot, "forget_voice_session", forget_mock)
+        monkeypatch.setattr(bot, "_reconnect_vc", reconnect_mock)
+        monkeypatch.setattr(bot, "load_voice_sessions", AsyncMock(return_value=[]))
+
+        member = MagicMock()
+        member.bot = True
+        member.id = 4242
+        member.guild.id = 5009
+        member.guild.voice_client = None
+        member.guild.audit_logs = denied_audit_logs
+        before = MagicMock()
+        before.channel = MagicMock()
+        before.channel.id = 7009
+        after = MagicMock()
+        after.channel = None
+
+        queues[5009] = deque([b"audio"])
+        read_channels.pop(5009, None)
+        try:
+            with caplog.at_level(logging.INFO):
+                await on_voice_state_update(member, before, after)
+                recovery_task = bot._self_voice_recovery_tasks[5009]
+                await recovery_task
+
+            forget_mock.assert_not_awaited()
+            reconnect_mock.assert_not_awaited()
+            assert 5009 not in queues
+            assert 5009 not in read_channels
+            assert "audit log を参照できないため手動切断確認を省略" in caplog.text
+            assert "VC 復旧に必要な session 情報がありません guild=5009" in caplog.text
+            assert "Bot が VC から手動切断されたため session を削除" not in caplog.text
+            assert "session 削除を保留 guild=5009" in caplog.text
+        finally:
+            client._connection.user = original_user
+            bot._self_voice_recovery_tasks.clear()
+            queues.pop(5009, None)
+            read_channels.pop(5009, None)
+
     async def test_shutdown_self_disconnect_does_not_forget_or_schedule(
         self, monkeypatch
     ):
