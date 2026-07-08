@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
-from typing import Any, TypeVar
-
-VoiceSettingsT = TypeVar("VoiceSettingsT")
+from typing import Any
 
 
 async def ensure_schema(conn: Any) -> None:
@@ -59,7 +57,7 @@ async def ensure_schema(conn: Any) -> None:
         )
 
 
-async def load_user_settings(
+async def load_user_settings[VoiceSettingsT](
     pool: Any,
     user_settings: MutableMapping[tuple[int, int], VoiceSettingsT],
     *,
