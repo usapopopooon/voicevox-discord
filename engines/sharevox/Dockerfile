@@ -1,7 +1,12 @@
+# syntax=docker/dockerfile:1
+
 FROM python:3.8-slim-bullseye
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
+    PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=10 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     SV_CPU_NUM_THREADS=4 \
     VV_OUTPUT_LOG_UTF8=1
 
@@ -32,8 +37,9 @@ RUN git clone --depth 1 --branch "${SHAREVOX_ENGINE_REF}" \
 
 WORKDIR /opt/sharevox_engine
 
-RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && python -m pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip setuptools wheel \
+    && python -m pip install -r requirements.txt
 
 RUN sed -i "s/__version__ = \"latest\"/__version__ = \"${SHAREVOX_ENGINE_VERSION}\"/" \
       /opt/sharevox_engine/voicevox_engine/__init__.py

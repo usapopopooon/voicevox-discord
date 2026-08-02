@@ -30,6 +30,19 @@ sharevox_assets = _load_module(
 )
 
 
+@pytest.mark.parametrize(
+    "dockerfile",
+    [ROOT / "coeiroink" / "Dockerfile", ROOT / "sharevox" / "Dockerfile"],
+)
+def test_engine_builds_retry_and_cache_pip_downloads(dockerfile: Path) -> None:
+    contents = dockerfile.read_text(encoding="utf-8")
+
+    assert "PIP_DEFAULT_TIMEOUT=300" in contents
+    assert "PIP_RETRIES=10" in contents
+    assert "--mount=type=cache,target=/root/.cache/pip" in contents
+    assert "pip install --no-cache-dir" not in contents
+
+
 def _coeiroink_args(release: Path) -> argparse.Namespace:
     return argparse.Namespace(
         manifest=str(release / ".voicevox-discord-coeiroink-manifest.json"),

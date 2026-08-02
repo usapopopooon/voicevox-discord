@@ -1,7 +1,12 @@
+# syntax=docker/dockerfile:1
+
 FROM ubuntu:20.04
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=10 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update && apt-get install -y \
     ca-certificates git curl wget build-essential libssl-dev zlib1g-dev \
@@ -23,22 +28,24 @@ RUN git clone --depth 1 -b "$COEIROINK_ENGINE_REF" \
     https://github.com/shirowanisan/voicevox_engine.git /opt/coeiroink_engine
 WORKDIR /opt/coeiroink_engine
 
-RUN python -m pip install --no-cache-dir --upgrade "pip<25" "setuptools<70" wheel && \
-    python -m pip install --no-cache-dir Cython==0.29.24 numpy==1.19.5 && \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade "pip<25" "setuptools<70" wheel && \
+    python -m pip install Cython==0.29.24 numpy==1.19.5 && \
     grep '^pyopenjtalk @' requirements.txt > /tmp/requirements-pyopenjtalk.txt && \
     grep -v '^pyopenjtalk @' requirements.txt > /tmp/requirements-engine.txt && \
-    python -m pip install --no-cache-dir --no-build-isolation --no-deps \
+    python -m pip install --no-build-isolation --no-deps \
         -r /tmp/requirements-pyopenjtalk.txt && \
-    python -m pip install --no-cache-dir -r /tmp/requirements-engine.txt && \
+    python -m pip install -r /tmp/requirements-engine.txt && \
     sed -i \
         -e 's#git+https://git@github.com/#git+https://github.com/#' \
         -e 's#@espnet-1\.10\.3#@espnet-0.10.3#' \
         requirements-coeiroink-no-deps.txt && \
-    python -m pip install --no-cache-dir --no-deps \
+    python -m pip install --no-deps \
         -r requirements-coeiroink-no-deps.txt && \
-    python -m pip install --no-cache-dir -r requirements-coeiroink.txt
+    python -m pip install -r requirements-coeiroink.txt
 
-RUN python -m pip install --no-cache-dir \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install \
     numpy==1.22.4 \
     numba==0.56.4 \
     llvmlite==0.39.1
