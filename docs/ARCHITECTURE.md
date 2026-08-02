@@ -450,8 +450,7 @@ docker compose up
 ```
 
 - `docker-compose.override.yml` が自動マージされ、ホットリロード・ポート公開が有効になる
-- VOICEVOX: `localhost:50021`、PostgreSQL: `localhost:5432` でアクセス可能
-- `COMPOSE_PROFILES=coeiroink,sharevox` を指定すると、COEIROINK: `localhost:50031`、SHAREVOX: `localhost:50025` も公開される
+- VOICEVOX: `localhost:50021`、COEIROINK: `localhost:50031`、SHAREVOX: `localhost:50025`、PostgreSQL: `localhost:5432` でアクセス可能
 
 ## Coolify デプロイ
 
@@ -462,8 +461,8 @@ docker compose up
 | **Bot** | `docker-compose.yml` の `voicevox-discord` サービス。`bot/Dockerfile` でビルド |
 | **PostgreSQL** | `postgres` サービス。`pgdata` ボリュームで永続化 |
 | **VOICEVOX** | `voicevox` サービス。`voicevox/voicevox_engine:cpu-latest` を利用 |
-| **COEIROINK v1** | 任意。`COMPOSE_PROFILES=coeiroink` で有効化し、`engines/coeiroink/Dockerfile` でビルド |
-| **SHAREVOX** | 任意。`COMPOSE_PROFILES=sharevox` で有効化し、`engines/sharevox/Dockerfile` でビルド |
+| **COEIROINK v1** | 標準起動。`engines/coeiroink/Dockerfile` でビルドし、話者モデルを名前付きvolumeへ保存 |
+| **SHAREVOX** | 標準起動。`engines/sharevox/Dockerfile` でビルドし、Core・モデル等を名前付きvolumeへ保存 |
 
 ### Bot の環境変数
 
@@ -475,25 +474,29 @@ docker compose up
 | `SHAREVOX_URL` | `http://sharevox:50025` |
 | `DATABASE_URL` | `postgresql://bot:bot@postgres:5432/voicevox_bot` |
 
-### COEIROINK v1 の有効化
+### COEIROINK v1 の資産キャッシュ
 
-Coolify の環境変数に `COMPOSE_PROFILES=coeiroink` と `COEIROINK_URL=http://coeiroink:50031` を設定する。
-`coeiroink` サービスはデフォルトで公式COEIROINKキャラクターを全件同梱する。
-モデルzipを多数ダウンロードし、Python/Torch系依存も重いため、初回ビルドには時間とディスク容量が必要。
+`coeiroink`サービスは常時起動し、デフォルトで公式COEIROINKキャラクターを全件取得する。
+話者モデルは`coeiroink_speaker_cache` volumeへ設定単位の世代として保存され、再デプロイ時は再取得しない。
+初回取得が中断された場合も完成済みスタイルを保持したまま再開し、話者・スタイル単位の
+完全性検証に成功した世代だけを`current` symlinkでアトミックに有効化する。
+モデルzipを多数ダウンロードするため、初回起動には時間とディスク容量が必要。
 
 必要な話者だけに絞る場合は、公式ダウンロードページの `prefix` を使い、以下の build args を上書きする。
 
 | build arg | 説明 |
 |---|---|
 | `COEIROINK_SPEAKER_SOURCE` | 公式ダウンロードページまたは `downloadableSpeakers` を含む JSON |
-| `COEIROINK_SPEAKER_PREFIXES` | 同梱する話者 prefix。空なら全件。複数指定は空白/カンマ区切り |
+| `COEIROINK_SPEAKER_PREFIXES` | 保存する話者 prefix。空なら全件。複数指定は空白/カンマ区切り |
+| `COEIROINK_FORCE_INSTALL` | `1`でvolume内の話者を設定どおりに入れ直す。通常は`0` |
 
-### SHAREVOX の有効化
+### SHAREVOX の資産キャッシュ
 
-Coolify の環境変数に `COMPOSE_PROFILES=sharevox` と `SHAREVOX_URL=http://sharevox:50025` を設定する。
-COEIROINK と併用する場合は `COMPOSE_PROFILES=coeiroink,sharevox` にする。
-`sharevox` サービスは SHAREVOX Engine / Core / 公式モデルを同梱する。
-モデルzipをダウンロードするため、初回ビルドには時間とディスク容量が必要。
+`sharevox`サービスは常時起動する。SHAREVOXの話者情報・Core・公式モデル・ONNX Runtimeを
+初回起動時に`sharevox_asset_cache` volumeへ世代別に取得し、再デプロイ時は既存資産を再利用する。
+設定したバージョンが変わった場合は別世代へ取得し、全資産の検証後に`current` symlinkを
+アトミックに切り替える。取得に失敗しても有効な旧世代は削除しない。
+モデルzipをダウンロードするため、初回起動には時間とディスク容量が必要。
 
 | build arg | 説明 |
 |---|---|
@@ -502,12 +505,15 @@ COEIROINK と併用する場合は `COMPOSE_PROFILES=coeiroink,sharevox` にす�
 | `SHAREVOX_RESOURCE_VERSION` | ダウンロードする話者情報リソースのバージョン |
 | `SHAREVOX_CORE_VERSION` | ダウンロードする `sharevox_core` のバージョン |
 | `SHAREVOX_MODEL_VERSION` | ダウンロードする公式モデルzipのバージョン |
+| `ONNXRUNTIME_VERSION` | ダウンロードするONNX Runtimeのバージョン |
+| `SHAREVOX_FORCE_INSTALL` | `1`でvolume内の全資産を入れ直す。通常は`0` |
 
 ### デプロイ手順
 
 1. Coolify で GitHub リポジトリを Docker Compose アプリとして作成
 2. `docker-compose.yml` を指定してサービスを作成
-3. Bot の環境変数に `DISCORD_TOKEN` または `DISCORD_TOKENS` を設定
+3. Custom Build Commandを`./scripts/coolify-build.sh`に設定し、COEIROINK・SHAREVOX・Botのimageをビルド
+4. Bot の環境変数に `DISCORD_TOKEN` または `DISCORD_TOKENS` を設定
 4. 必要に応じて `VOICEVOX_URL` や `DATABASE_URL` を本番環境向けに上書き
 5. デプロイ
 

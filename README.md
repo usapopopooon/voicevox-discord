@@ -106,41 +106,49 @@ DISCORD_TOKEN=token1
 ## Coolify デプロイ
 
 1. Coolify で GitHub リポジトリを Docker Compose アプリとして作成
-2. `docker-compose.yml` を使って `voicevox-discord` / `voicevox` / `postgres` を起動
-3. Bot の環境変数を設定:
+2. `docker-compose.yml` を使って全サービスを起動
+3. Custom Build Commandを`./scripts/coolify-build.sh`に設定
+4. Bot の環境変数を設定:
    - `DISCORD_TOKEN` または `DISCORD_TOKENS` — Discord Developer Portal から取得
    - `VOICEVOX_URL` — `http://voicevox:50021`
    - `COEIROINK_URL` — `http://coeiroink:50031`
    - `SHAREVOX_URL` — `http://sharevox:50025`
    - `DATABASE_URL` — `postgresql://bot:bot@127.0.0.1:5432/voicevox_bot`
 
-### COEIROINK v1 を使う場合
+Botだけをビルドする`docker compose build voicevox-discord`は使用しません。新規ホストや
+Docker image整理後でも全エンジンを起動できるよう、上記スクリプトで3つのローカルimageを
+必ずビルドします。話者・モデル資産はimageではなく名前付きvolumeへ保持されます。
 
-Coolify の環境変数に以下を追加します。
+### COEIROINK v1
+
+COEIROINKは標準で起動します。公式キャラクターのモデルは初回起動時に取得し、
+`coeiroink_speaker_cache` Docker volumeへ世代別に保存します。再デプロイ時は既存モデルを
+再利用し、中断された初回取得も完了済みスタイルを残して再開します。新しい世代は
+完全性検証に成功してから有効化するため、取得失敗時も現在の世代を保持します。
 
 ```env
-COMPOSE_PROFILES=coeiroink
 COEIROINK_URL=http://coeiroink:50031
 ```
 
-`coeiroink` サービスはデフォルトで公式COEIROINKキャラクターを全件同梱してビルドします。モデルzipを多数ダウンロードするため、Coolify 側のディスク空き容量と初回ビルド時間には余裕を持たせてください。必要な話者だけに絞る場合は `COEIROINK_SPEAKER_PREFIXES` を build args として上書きします。
+モデルzipを多数ダウンロードするため、Coolify側のディスク空き容量と初回起動時間には余裕を持たせてください。必要な話者だけに絞る場合は`COEIROINK_SPEAKER_PREFIXES`を設定します。設定変更後にvolumeを更新する場合は`COEIROINK_FORCE_INSTALL=1`で一度起動し、完了後に`0`へ戻します。
 
-### SHAREVOX を使う場合
+### SHAREVOX
 
-Coolify の環境変数に以下を追加します。
+SHAREVOXも標準で起動します。エンジン資産・Core・モデル・ONNX Runtimeは初回起動時に
+取得し、`sharevox_asset_cache` Docker volumeへ世代別に保存して再デプロイ時に再利用します。
+新しい世代は全資産が揃った後にアトミックに有効化します。
 
 ```env
-COMPOSE_PROFILES=sharevox
 SHAREVOX_URL=http://sharevox:50025
 ```
 
-COEIROINK と併用する場合は `COMPOSE_PROFILES=coeiroink,sharevox` にします。`sharevox` サービスは SHAREVOX Engine / Core / 公式モデルを同梱してビルドします。初回ビルドではモデルzipをダウンロードするため、Coolify 側のディスク空き容量と初回ビルド時間には余裕を持たせてください。
+初回起動ではモデルzipをダウンロードするため、Coolify側のディスク空き容量と起動時間には余裕を持たせてください。バージョン設定を変更するとvolume内の資産が更新されます。全資産を入れ直す場合は`SHAREVOX_FORCE_INSTALL=1`で一度起動し、完了後に`0`へ戻します。
 
 ## 技術スタック
 
 - Python 3.12 / discord.py (voice)
 - VOICEVOX Engine (CPU版)
-- COEIROINK v1 / SHAREVOX（任意）
+- COEIROINK v1 / SHAREVOX
 - PostgreSQL + asyncpg
 - Docker Compose (ローカル / Coolify 本番)
 - GitHub Actions (ruff + pyright + Pylance strict pyright + pytest)

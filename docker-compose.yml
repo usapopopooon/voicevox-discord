@@ -12,8 +12,6 @@ services:
     restart: unless-stopped
 
   coeiroink:
-    profiles:
-      - coeiroink
     image: ${COEIROINK_IMAGE:-voicevox-discord-coeiroink:latest}
     build:
       context: ./engines/coeiroink
@@ -26,6 +24,12 @@ services:
     environment:
       VV_CPU_NUM_THREADS: "4"
       VV_OUTPUT_LOG_UTF8: "1"
+      COEIROINK_SPEAKER_SOURCE: ${COEIROINK_SPEAKER_SOURCE:-https://coeiroink.com/download}
+      COEIROINK_SPEAKER_PREFIXES: ${COEIROINK_SPEAKER_PREFIXES:-}
+      COEIROINK_FORCE_INSTALL: ${COEIROINK_FORCE_INSTALL:-0}
+    volumes:
+      - coeiroink_speaker_cache:/opt/coeiroink_cache
+      - coeiroink_openjtalk_dic:/opt/pyenv/versions/3.8.10/lib/python3.8/site-packages/pyopenjtalk/open_jtalk_dic_utf_8-1.11
     deploy:
       resources:
         limits:
@@ -33,8 +37,6 @@ services:
     restart: unless-stopped
 
   sharevox:
-    profiles:
-      - sharevox
     image: ${SHAREVOX_IMAGE:-voicevox-discord-sharevox:latest}
     build:
       context: ./engines/sharevox
@@ -49,6 +51,15 @@ services:
     environment:
       SV_CPU_NUM_THREADS: "4"
       VV_OUTPUT_LOG_UTF8: "1"
+      SHAREVOX_ENGINE_VERSION: ${SHAREVOX_ENGINE_VERSION:-0.2.1}
+      SHAREVOX_RESOURCE_VERSION: ${SHAREVOX_RESOURCE_VERSION:-0.2.1}
+      SHAREVOX_CORE_VERSION: ${SHAREVOX_CORE_VERSION:-0.2.1}
+      SHAREVOX_MODEL_VERSION: ${SHAREVOX_MODEL_VERSION:-0.2.1}
+      ONNXRUNTIME_VERSION: ${ONNXRUNTIME_VERSION:-1.12.1}
+      SHAREVOX_FORCE_INSTALL: ${SHAREVOX_FORCE_INSTALL:-0}
+    volumes:
+      - sharevox_asset_cache:/opt/sharevox_cache
+      - sharevox_openjtalk_dic:/usr/local/lib/python3.8/site-packages/pyopenjtalk/open_jtalk_dic_utf_8-1.11
     deploy:
       resources:
         limits:
@@ -83,9 +94,9 @@ services:
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN:-}
       DISCORD_TOKENS: ${DISCORD_TOKENS:-}
-      VOICEVOX_URL: ${VOICEVOX_URL:-http://voicevox:50021}
-      COEIROINK_URL: ${COEIROINK_URL:-http://coeiroink:50031}
-      SHAREVOX_URL: ${SHAREVOX_URL:-http://sharevox:50025}
+      VOICEVOX_URL: http://voicevox:50021
+      COEIROINK_URL: http://coeiroink:50031
+      SHAREVOX_URL: http://sharevox:50025
       DEFAULT_SPEAKER_ID: ${DEFAULT_SPEAKER_ID:-46}
       DATABASE_URL: ${DATABASE_URL:-postgresql://bot:bot@127.0.0.1:5432/voicevox_bot}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -105,10 +116,16 @@ services:
     network_mode: service:postgres
     depends_on:
       - voicevox
+      - coeiroink
+      - sharevox
       - postgres
     restart: unless-stopped
 
 volumes:
+  coeiroink_speaker_cache:
+  coeiroink_openjtalk_dic:
+  sharevox_asset_cache:
+  sharevox_openjtalk_dic:
   pgdata:
 
 networks:

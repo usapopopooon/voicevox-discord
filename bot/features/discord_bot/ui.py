@@ -975,7 +975,11 @@ class ControlPanelView(ui.View):
         guild = await _ctx()._require_guild_interaction(interaction)
         if guild is None:
             return
-        if not _ctx().characters and not _ctx().speaker_engine:
+        if (
+            not _ctx().characters
+            or not _ctx().speaker_engine
+            or _ctx()._has_missing_configured_speaker_engines()
+        ):
             await interaction.response.defer(ephemeral=True, thinking=True)
             await _ctx()._refresh_speakers_if_needed()
         await _ctx()._respond(

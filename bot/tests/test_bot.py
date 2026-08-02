@@ -2336,6 +2336,36 @@ class TestPanelStatusLicenseCommands:
         assert kwargs["embed"].title == "読み上げBot 操作パネル"
         assert kwargs["view"] is not None
 
+    async def test_speaker_button_refreshes_partially_loaded_engines(self):
+        import bot
+
+        interaction = _make_interaction(guild_id=9901, user_id=9902)
+        view = bot.ControlPanelView(interaction.guild)
+        button = next(
+            child
+            for child in view.children
+            if isinstance(child, discord.ui.Button)
+            and child.custom_id == "panel:speaker"
+        )
+
+        with (
+            patch(
+                "bot._has_missing_configured_speaker_engines",
+                return_value=True,
+            ),
+            patch(
+                "bot._refresh_speakers_if_needed",
+                new=AsyncMock(),
+            ) as refresh,
+        ):
+            await button.callback(interaction)
+
+        interaction.response.defer.assert_awaited_once_with(
+            ephemeral=True,
+            thinking=True,
+        )
+        refresh.assert_awaited_once()
+
     async def test_panel_view_disables_runtime_actions_when_disconnected(self):
         import bot
 
